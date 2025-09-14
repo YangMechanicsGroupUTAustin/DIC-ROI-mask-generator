@@ -168,8 +168,13 @@ Download the pre-trained SAM 2 models from the official repository and place the
 - **Poor Mask Quality**: Add more control points or adjust smoothing parameters
 - **MATLAB Errors**: Ensure MATLAB is properly installed and licensed
 
-### Support
+## Support and Contact
 For technical support and bug reports, please refer to the GitHub repository issues page.
+
+**Contact:**
+Zixiang (Zach) Tong: zachtong@utexas.edu
+Jin Yang: jin.yang@austin.utexas.edu
+All other ALDIC/DVC support: aldicdvc@gmail.com
 
 ## Citation
 
