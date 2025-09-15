@@ -172,9 +172,9 @@ Download the pre-trained SAM 2 models from the official repository and place the
 For technical support and bug reports, please refer to the GitHub repository issues page.
 
 **Contact:**
-Zixiang (Zach) Tong: zachtong@utexas.edu
-Jin Yang: jin.yang@austin.utexas.edu
-All other ALDIC/DVC support: aldicdvc@gmail.com
+- Zixiang (Zach) Tong: zachtong@utexas.edu
+- Jin Yang: jin.yang@austin.utexas.edu
+- For other ALDIC/DVC questions/support, please email to: aldicdvc@gmail.com
 
 ## Citation
 
