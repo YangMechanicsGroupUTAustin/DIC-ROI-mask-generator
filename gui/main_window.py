@@ -191,6 +191,13 @@ class MainWindow(QMainWindow):
         self._sidebar.format_changed.connect(state.set_intermediate_format)
         self._sidebar.threshold_changed.connect(state.set_threshold)
 
+        self._sidebar.preprocessing_preview_requested.connect(
+            self._on_preview_preprocessing
+        )
+        self._sidebar.preprocessing_preview_reset.connect(
+            self._on_reset_preprocessing_preview
+        )
+
         if smoothing is not None:
             self._sidebar.spatial_smooth_requested.connect(
                 self._on_spatial_smooth
@@ -759,6 +766,50 @@ class MainWindow(QMainWindow):
         elif was_processing:
             self._state.set_state(self._state.State.INIT)
         self._show_error("Processing Error", error_msg)
+
+    # --- Preprocessing preview handlers ---
+
+    def _on_preview_preprocessing(self, config) -> None:
+        """Preview preprocessing effect on current frame."""
+        if self._state is None or self._state.current_original is None:
+            return
+
+        from core.preprocessing import apply_pipeline
+        import cv2
+
+        # Current original is RGB; preprocessing works on BGR
+        original_bgr = cv2.cvtColor(
+            self._state.current_original, cv2.COLOR_RGB2BGR,
+        )
+
+        # Downsample for fast preview if large
+        h, w = original_bgr.shape[:2]
+        max_preview = 1024
+        if max(h, w) > max_preview:
+            scale = max_preview / max(h, w)
+            preview_bgr = cv2.resize(
+                original_bgr,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            preview_bgr = original_bgr
+
+        processed = apply_pipeline(preview_bgr, config)
+        processed_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+
+        # Scale back to original display size if needed
+        if processed_rgb.shape[:2] != (h, w):
+            processed_rgb = cv2.resize(
+                processed_rgb, (w, h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+        self._state.set_display_images(original=processed_rgb)
+
+    def _on_reset_preprocessing_preview(self) -> None:
+        """Reset to the unprocessed original image."""
+        self._load_current_frame()
 
     # --- Smoothing handlers ---
 
