@@ -139,10 +139,49 @@ class SAM2App:
         progress_frame.pack(fill=tk.X, pady=(0, 10))
         self.setup_progress_bar(progress_frame)
 
+        # Post-processing controls
+        postproc_frame = ttk.LabelFrame(main_frame, text="Post-Processing (Smoothing)")
+        postproc_frame.pack(fill=tk.X, pady=(0, 10))
+
+        spatial_frame = ttk.Frame(postproc_frame)
+        spatial_frame.pack(fill=tk.X, pady=2, padx=5)
+        ttk.Label(spatial_frame, text="Iterations:").pack(side=tk.LEFT, padx=2)
+        self.smooth_iter_var = tk.IntVar(value=50)
+        ttk.Entry(spatial_frame, textvariable=self.smooth_iter_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Label(spatial_frame, text="dt:").pack(side=tk.LEFT, padx=2)
+        self.smooth_dt_var = tk.DoubleVar(value=0.1)
+        ttk.Entry(spatial_frame, textvariable=self.smooth_dt_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Label(spatial_frame, text="Lambda:").pack(side=tk.LEFT, padx=2)
+        self.smooth_lambda_var = tk.DoubleVar(value=0.5)
+        ttk.Entry(spatial_frame, textvariable=self.smooth_lambda_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Button(spatial_frame, text="Spatial Smooth", command=self.run_spatial_smoothing).pack(side=tk.LEFT, padx=5)
+
+        temporal_frame = ttk.Frame(postproc_frame)
+        temporal_frame.pack(fill=tk.X, pady=2, padx=5)
+        ttk.Label(temporal_frame, text="Var Threshold:").pack(side=tk.LEFT, padx=2)
+        self.temporal_var_thresh = tk.DoubleVar(value=50000)
+        ttk.Entry(temporal_frame, textvariable=self.temporal_var_thresh, width=7).pack(side=tk.LEFT, padx=2)
+        ttk.Label(temporal_frame, text="Neighbors:").pack(side=tk.LEFT, padx=2)
+        self.temporal_neighbors_var = tk.IntVar(value=2)
+        ttk.Entry(temporal_frame, textvariable=self.temporal_neighbors_var, width=3).pack(side=tk.LEFT, padx=2)
+        ttk.Label(temporal_frame, text="Sigma:").pack(side=tk.LEFT, padx=2)
+        self.temporal_sigma_var = tk.DoubleVar(value=2.0)
+        ttk.Entry(temporal_frame, textvariable=self.temporal_sigma_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Button(temporal_frame, text="Temporal Smooth", command=self.run_temporal_smoothing).pack(side=tk.LEFT, padx=5)
+
         # Image frame: original image and mask display
         image_frame = ttk.Frame(main_frame)
         image_frame.pack(fill=tk.BOTH, expand=True)
         self.setup_image_display(image_frame)
+
+        # Keyboard shortcuts
+        self.master.bind('<Control-z>', lambda e: self.undo_last_point())
+        self.master.bind('<Control-s>', lambda e: self.save_config())
+        self.master.bind('<Control-o>', lambda e: self.load_config())
+        self.master.bind('<Left>', lambda e: self.prev_frame())
+        self.master.bind('<Right>', lambda e: self.next_frame())
+        self.master.bind('<space>', lambda e: self.toggle_plotting_mode())
+        self.master.bind('<Escape>', lambda e: self.stop_processing())
 
     def setup_io_frame(self, parent):
         input_frame = ttk.Frame(parent)
@@ -171,13 +210,13 @@ class SAM2App:
         self.clear_points_btn = ttk.Button(parent, text="Clear Points", command=self.clear_points)
         self.clear_points_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
-        self.undo_point_btn = ttk.Button(parent, text="Undo Last Point", command=self.undo_last_point)
+        self.undo_point_btn = ttk.Button(parent, text="Undo [Ctrl+Z]", command=self.undo_last_point)
         self.undo_point_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
-        self.save_config_btn = ttk.Button(parent, text="Save Config", command=self.save_config)
+        self.save_config_btn = ttk.Button(parent, text="Save [Ctrl+S]", command=self.save_config)
         self.save_config_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
-        self.load_config_btn = ttk.Button(parent, text="Load Config", command=self.load_config)
+        self.load_config_btn = ttk.Button(parent, text="Load [Ctrl+O]", command=self.load_config)
         self.load_config_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
     def setup_analysis_controls(self, parent):
@@ -245,6 +284,12 @@ class SAM2App:
             command=self.apply_correction, state=tk.DISABLED
         )
         self.apply_correction_btn.pack(side=tk.LEFT, padx=(5, 0))
+
+        self.force_reprocess_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            control_frame, text="Force Re-process",
+            variable=self.force_reprocess_var
+        ).pack(side=tk.LEFT, padx=(5, 0))
 
         # Mask threshold control
         threshold_frame = ttk.Frame(parent)
@@ -872,16 +917,21 @@ class SAM2App:
             self.master.after(0, self.display_image)
 
             # Save the binary mask with error handling
-            try:
-                mask1_dir = os.path.join(self.config.output_dir, "mask1")
-                os.makedirs(mask1_dir, exist_ok=True)
-                mask_path = os.path.join(mask1_dir, image_name)
-                success = cv2.imwrite(mask_path, binary_masks[0])
-                if not success:
-                    print(f"Warning: Failed to save mask for {image_name}")
-            except Exception as e:
-                print(f"Error saving mask for {image_name}: {str(e)}")
-                # Continue processing other frames even if one fails
+            mask1_dir = os.path.join(self.config.output_dir, "mask1")
+            os.makedirs(mask1_dir, exist_ok=True)
+            mask_path = os.path.join(mask1_dir, image_name)
+
+            # Skip if mask already exists and not force re-processing
+            if os.path.exists(mask_path) and not self.force_reprocess_var.get():
+                # Still update display but don't re-save
+                pass
+            else:
+                try:
+                    success = cv2.imwrite(mask_path, binary_masks[0])
+                    if not success:
+                        print(f"Warning: Failed to save mask for {image_name}")
+                except Exception as e:
+                    print(f"Error saving mask for {image_name}: {e}")
 
             # Update progress - show mask prediction progress only
             mask_progress = (out_frame_idx + 1) / len(processing_images) * 100
@@ -1019,6 +1069,114 @@ class SAM2App:
             self.master.after(0, lambda: messagebox.showerror("Error", f"Re-propagation failed: {e}"))
         finally:
             self.master.after(0, self._on_processing_complete)
+
+    def run_spatial_smoothing(self):
+        """Run spatial smoothing on generated masks in background thread."""
+        mask_dir = os.path.join(self.config.output_dir, "mask1")
+        if not os.path.exists(mask_dir):
+            messagebox.showerror("Error", "No masks found. Run mask generation first.")
+            return
+
+        output_dir = os.path.join(self.config.output_dir, "mask_spatial_smoothing")
+        os.makedirs(output_dir, exist_ok=True)
+
+        self.start_btn.config(state=tk.DISABLED)
+        thread = threading.Thread(
+            target=self._spatial_smooth_thread,
+            args=(mask_dir, output_dir),
+            daemon=True,
+        )
+        thread.start()
+
+    def _spatial_smooth_thread(self, mask_dir, output_dir):
+        from core.spatial_smoothing import perona_malik_smooth
+        try:
+            mask_files = sorted(
+                [f for f in os.listdir(mask_dir) if f.lower().endswith(('.png', '.tiff', '.tif', '.jpg', '.bmp'))],
+                key=extract_numbers
+            )
+            total = len(mask_files)
+
+            for i, fname in enumerate(mask_files):
+                mask = cv2.imread(os.path.join(mask_dir, fname), cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    continue
+
+                smoothed = perona_malik_smooth(
+                    mask,
+                    num_iterations=self.smooth_iter_var.get(),
+                    dt=self.smooth_dt_var.get(),
+                    lam=self.smooth_lambda_var.get(),
+                )
+                cv2.imwrite(os.path.join(output_dir, fname), smoothed)
+
+                progress = (i + 1) / total * 100
+                self.master.after(0, lambda p=progress: self.update_progress(p))
+                self.master.after(0, lambda ii=i, t=total: self.progress_label.config(
+                    text=f"Spatial smoothing: {ii+1}/{t}"
+                ))
+
+            self.master.after(0, lambda: messagebox.showinfo("Done", f"Spatial smoothing saved to:\n{output_dir}"))
+        except Exception as e:
+            self.master.after(0, lambda: messagebox.showerror("Error", str(e)))
+        finally:
+            self.master.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+
+    def run_temporal_smoothing(self):
+        """Run temporal smoothing on spatially-smoothed or raw masks."""
+        spatial_dir = os.path.join(self.config.output_dir, "mask_spatial_smoothing")
+        if not os.path.exists(spatial_dir):
+            spatial_dir = os.path.join(self.config.output_dir, "mask1")
+        if not os.path.exists(spatial_dir):
+            messagebox.showerror("Error", "No masks found for temporal smoothing.")
+            return
+
+        output_dir = os.path.join(self.config.output_dir, "mask_temporal_smoothing")
+        os.makedirs(output_dir, exist_ok=True)
+
+        self.start_btn.config(state=tk.DISABLED)
+        thread = threading.Thread(
+            target=self._temporal_smooth_thread,
+            args=(spatial_dir, output_dir),
+            daemon=True,
+        )
+        thread.start()
+
+    def _temporal_smooth_thread(self, input_dir, output_dir):
+        from core.temporal_smoothing import temporal_smooth_sequence
+        try:
+            mask_files = sorted(
+                [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.tiff', '.tif', '.jpg', '.bmp'))],
+                key=extract_numbers
+            )
+
+            frames = []
+            for fname in mask_files:
+                mask = cv2.imread(os.path.join(input_dir, fname), cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    frames.append(mask)
+
+            def progress_cb(step_name, current, total):
+                self.master.after(0, lambda s=step_name, c=current, t=total:
+                    self.progress_label.config(text=f"Temporal: {s} ({c}/{t})")
+                )
+
+            results = temporal_smooth_sequence(
+                frames,
+                variance_threshold=self.temporal_var_thresh.get(),
+                num_neighbors=self.temporal_neighbors_var.get(),
+                sigma=self.temporal_sigma_var.get(),
+                progress_callback=progress_cb,
+            )
+
+            for result, fname in zip(results, mask_files):
+                cv2.imwrite(os.path.join(output_dir, fname), result)
+
+            self.master.after(0, lambda: messagebox.showinfo("Done", f"Temporal smoothing saved to:\n{output_dir}"))
+        except Exception as e:
+            self.master.after(0, lambda: messagebox.showerror("Error", str(e)))
+        finally:
+            self.master.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
 
     def cleanup_temp_folders(self):
         if not self.config.input_dir:
