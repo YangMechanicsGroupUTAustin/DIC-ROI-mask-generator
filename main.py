@@ -18,7 +18,7 @@ import shutil
 import time
 import threading
 from utils.dpi_scaling import DPIScaler
-from core.image_processing import get_image_files, load_image_as_rgb, extract_numbers, create_overlay
+from core.image_processing import get_image_files, load_image_as_rgb, extract_numbers, create_overlay, convert_to_jpeg, convert_to_png
 
 # Set random seed
 np.random.seed(3)
@@ -28,10 +28,6 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 # Get the absolute path of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Device selection
-device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-print(f"Using device: {device}")
 
 # User-customizable parameters
 class Config:
@@ -150,14 +146,35 @@ class SAM2App:
         self.clear_points_btn = ttk.Button(parent, text="Clear Points", command=self.clear_points)
         self.clear_points_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
+        self.undo_point_btn = ttk.Button(parent, text="Undo Last Point", command=self.undo_last_point)
+        self.undo_point_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
     def setup_analysis_controls(self, parent):
         device_frame = ttk.Frame(parent)
         device_frame.pack(fill=tk.X, pady=5)
         ttk.Label(device_frame, text="Device:").pack(side=tk.LEFT, padx=(0, 5))
         self.device_var = tk.StringVar(self.master)
-        self.device_var.set("CPU")
+
+        # Build device list dynamically based on availability
+        available_devices = ["CPU"]
+        if torch.cuda.is_available():
+            available_devices.append("GPU (CUDA)")
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            available_devices.append("GPU (MPS)")
+
+        # Auto-select the best device
+        if "GPU (CUDA)" in available_devices:
+            self.device_var.set("GPU (CUDA)")
+            self.device = 'cuda'
+        elif "GPU (MPS)" in available_devices:
+            self.device_var.set("GPU (MPS)")
+            self.device = 'mps'
+        else:
+            self.device_var.set("CPU")
+            self.device = 'cpu'
+
         self.device_menu = ttk.Combobox(device_frame, textvariable=self.device_var,
-                                        values=["CPU", "GPU"])
+                                        values=available_devices)
         self.device_menu.pack(side=tk.LEFT, padx=(0, 10))
         self.device_menu.bind("<<ComboboxSelected>>", self.on_device_change)
 
@@ -169,6 +186,15 @@ class SAM2App:
                                                "SAM2 Hiera Small", "SAM2 Hiera Tiny"])
         self.model_menu.pack(side=tk.LEFT, padx=(0, 10))
 
+        ttk.Label(device_frame, text="Intermediate:").pack(side=tk.LEFT, padx=(10, 5))
+        self.intermediate_format_var = tk.StringVar(value="JPEG (fast)")
+        self.format_menu = ttk.Combobox(
+            device_frame, textvariable=self.intermediate_format_var,
+            values=["JPEG (fast)", "PNG (lossless)"],
+            width=14
+        )
+        self.format_menu.pack(side=tk.LEFT, padx=(0, 10))
+
         control_frame = ttk.Frame(parent)
         control_frame.pack(fill=tk.X, pady=5)
         self.start_btn = ttk.Button(control_frame, text="Start Processing", command=self.start_processing)
@@ -176,6 +202,24 @@ class SAM2App:
         self.stop_btn = ttk.Button(control_frame, text="Stop Processing", command=self.stop_processing,
                                    state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        # Mask threshold control
+        threshold_frame = ttk.Frame(parent)
+        threshold_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(threshold_frame, text="Mask Threshold:").pack(side=tk.LEFT, padx=(0, 5))
+        self.threshold_var = tk.DoubleVar(value=0.0)
+        self.threshold_scale = ttk.Scale(
+            threshold_frame, from_=-5.0, to=5.0,
+            variable=self.threshold_var,
+            orient=tk.HORIZONTAL,
+        )
+        self.threshold_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.threshold_label = ttk.Label(threshold_frame, text="0.0")
+        self.threshold_label.pack(side=tk.LEFT, padx=5)
+
+        def update_threshold_label(val):
+            self.threshold_label.config(text=f"{float(val):.1f}")
+        self.threshold_scale.config(command=update_threshold_label)
 
     def setup_progress_bar(self, parent):
         self.progress_var = tk.DoubleVar()
@@ -214,20 +258,14 @@ class SAM2App:
             self.output_entry.insert(0, self.config.output_dir)
 
     def on_device_change(self, event):
-        selected_device = self.device_var.get()
-        if selected_device == "GPU":
-            if torch.cuda.is_available():
-                self.device = 'cuda'
-                print("GPU selected and available. Using CUDA.")
-            else:
-                self.device = 'cpu'
-                self.device_var.set("CPU")
-                messagebox.showwarning("GPU Not Available",
-                                       "GPU is not available. Switching to CPU.")
-                print("GPU not available. Falling back to CPU.")
+        selected = self.device_var.get()
+        if selected == "GPU (CUDA)":
+            self.device = 'cuda'
+        elif selected == "GPU (MPS)":
+            self.device = 'mps'
         else:
             self.device = 'cpu'
-            print("CPU selected.")
+        print(f"Device set to: {self.device}")
 
     def show_raw_image(self):
         image_files = get_image_files(self.config.input_dir)
@@ -333,6 +371,17 @@ class SAM2App:
         self.config.input_labels = []
         self.display_image(keep_points=True)
         messagebox.showinfo("Info", "All points have been cleared.")
+
+    def undo_last_point(self):
+        """Remove the last added annotation point."""
+        if self.config.input_points:
+            removed_point = self.config.input_points.pop()
+            removed_label = self.config.input_labels.pop()
+            label_name = "foreground" if removed_label == 1 else "background"
+            print(f"Undone {label_name} point at {removed_point}")
+            self.display_image()
+        else:
+            messagebox.showinfo("Info", "No points to undo.")
 
     def update_image_with_points(self, ax=None):
         if ax is None:
@@ -529,11 +578,15 @@ class SAM2App:
         self.start_index_previous = self.start_index
         self.end_index_previous = self.end_index
 
-        # Check JPEG files in temporary folder
-        existing_jpegs = {os.path.basename(f): f for f in glob.glob(os.path.join(temp_dir, "*.jpg"))}
+        # Determine intermediate format
+        use_png = self.intermediate_format_var.get() == "PNG (lossless)"
+        ext = ".png" if use_png else ".jpg"
 
-        # Convert all images to JPEG format
-        jpeg_files = []
+        # Check existing intermediate files in temporary folder
+        existing_intermediates = {os.path.basename(f): f for f in glob.glob(os.path.join(temp_dir, f"*{ext}"))}
+
+        # Convert all images to intermediate format
+        intermediate_files = []
         processing_images = image_files[self.start_index-1:self.end_index]
         num_processing_images = len(processing_images)
 
@@ -543,88 +596,40 @@ class SAM2App:
 
         for idx, img_path in enumerate(processing_images):
             # Use simple numeric sequence naming for temporary files
-            jpeg_name = f"{idx+self.start_index:06d}.jpg"  # Generate filename like "000001.jpg"
-            jpeg_path = os.path.join(temp_dir, jpeg_name)
+            temp_name = f"{idx+self.start_index:06d}{ext}"
+            temp_path = os.path.join(temp_dir, temp_name)
 
-            # Check if corresponding JPEG file already exists
-            if jpeg_name in existing_jpegs:
-                jpeg_files.append(jpeg_path)
+            # Check if corresponding intermediate file already exists
+            if temp_name in existing_intermediates:
+                intermediate_files.append(temp_path)
                 continue
 
             try:
-                # First try to read with OpenCV
-                img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-
-                # If OpenCV reading fails, try with PIL/Pillow
-                if img is None:
-
-                    print(f"OpenCV failed to read image: {img_path}. Trying with PIL...")
-
-                    # Use PIL to read image
-                    pil_image = Image.open(img_path)
-
-                    # Extract bit depth information for logging
-                    bit_depth = getattr(pil_image, 'bit_depth', 'unknown')
-                    print(f"Image format: {pil_image.format}, Mode: {pil_image.mode}, Bit depth: {bit_depth}")
-
-                    # Special handling for 32-bit floating point TIFF and other high bit depth images
-                    if pil_image.mode in ['F', 'I', 'I;16', 'I;32']:
-                        # Convert to numpy array
-                        img_array = np.array(pil_image)
-
-                        # Normalize to 0-255 range
-                        min_val = np.min(img_array)
-                        max_val = np.max(img_array)
-
-                        if max_val > min_val:  # Avoid division by zero
-                            img = ((img_array - min_val) / (max_val - min_val) * 255).astype(np.uint8)
-                        else:
-                            img = np.zeros_like(img_array, dtype=np.uint8)
-
-                        # If single channel image, convert to RGB
-                        if len(img.shape) == 2:
-                            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                    else:
-                        # For standard modes, convert to RGB
-                        pil_image = pil_image.convert('RGB')
-                        img = np.array(pil_image)
-                        # PIL's RGB order is different from OpenCV's BGR order, need conversion
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                if use_png:
+                    success = convert_to_png(img_path, temp_path)
                 else:
-                    # OpenCV successfully read, handle different data types
-                    if img.dtype == np.uint16:
-                        img = (img / 256).astype(np.uint8)
-                    elif img.dtype == np.float32 or img.dtype == np.float64:
-                        min_val = np.min(img)
-                        max_val = np.max(img)
-                        if max_val > min_val:
-                            img = ((img - min_val) / (max_val - min_val) * 255).astype(np.uint8)
-                        else:
-                            img = np.zeros_like(img, dtype=np.uint8)
+                    success = convert_to_jpeg(img_path, temp_path)
 
-                    # Ensure image is colored
-                    if len(img.shape) == 2 or (len(img.shape) == 3 and img.shape[2] == 1):
-                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-
-                # Save as JPEG
-                cv2.imwrite(jpeg_path, img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                jpeg_files.append(jpeg_path)
+                if success:
+                    intermediate_files.append(temp_path)
+                else:
+                    raise RuntimeError(f"Conversion failed for {img_path}")
 
             except Exception as e:
                 print(f"Failed to process image {img_path}: {str(e)}")
                 # If processing fails, create a black image as placeholder
                 try:
                     ref_shape = None
-                    for existing_jpeg in jpeg_files:
-                        ref_img = cv2.imread(existing_jpeg)
+                    for existing_file in intermediate_files:
+                        ref_img = cv2.imread(existing_file)
                         if ref_img is not None:
                             ref_shape = ref_img.shape
                             break
                     if ref_shape is None:
                         ref_shape = (512, 512, 3)
                     blank_img = np.zeros(ref_shape, dtype=np.uint8)
-                    cv2.imwrite(jpeg_path, blank_img)
-                    jpeg_files.append(jpeg_path)
+                    cv2.imwrite(temp_path, blank_img)
+                    intermediate_files.append(temp_path)
                     print(f"Created placeholder ({ref_shape[1]}x{ref_shape[0]}) for {img_path}")
                 except Exception as e:
                     print(f"Failed to create placeholder for {img_path}: {e}")
@@ -702,8 +707,9 @@ class SAM2App:
                 continue
 
             # Process inference results (this part is the core post-inference processing)
+            threshold = self.threshold_var.get()
             video_segments[out_frame_idx] = {
-                out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
+                out_obj_id: (out_mask_logits[i] > threshold).cpu().numpy()
                 for i, out_obj_id in enumerate(out_obj_ids)
             }
 
