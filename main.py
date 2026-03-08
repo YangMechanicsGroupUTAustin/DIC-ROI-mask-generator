@@ -19,6 +19,7 @@ import time
 import threading
 from utils.dpi_scaling import DPIScaler
 from core.image_processing import get_image_files, load_image_as_rgb, extract_numbers, create_overlay, convert_to_jpeg, convert_to_png
+from core.annotation_config import save_annotation_config, load_annotation_config
 
 # Set random seed
 np.random.seed(3)
@@ -93,6 +94,25 @@ class SAM2App:
         self.end_index_entry = ttk.Entry(range_frame, width=5)
         self.end_index_entry.pack(side=tk.LEFT, padx=(0, 5))
 
+        # Frame navigation controls
+        nav_frame = ttk.Frame(main_frame)
+        nav_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Button(nav_frame, text="<< Prev", command=self.prev_frame).pack(side=tk.LEFT, padx=2)
+        ttk.Button(nav_frame, text="Next >>", command=self.next_frame).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(nav_frame, text="Preview frame:").pack(side=tk.LEFT, padx=(10, 5))
+        self.preview_index_var = tk.IntVar(value=1)
+        self.preview_slider = ttk.Scale(
+            nav_frame, from_=1, to=100,
+            variable=self.preview_index_var,
+            orient=tk.HORIZONTAL,
+            command=self._on_slider_change
+        )
+        self.preview_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.preview_label = ttk.Label(nav_frame, text="1 / ?")
+        self.preview_label.pack(side=tk.LEFT, padx=5)
+
         # Middle frame for controls
         middle_frame = ttk.Frame(main_frame)
         middle_frame.pack(fill=tk.X, pady=(0, 10))
@@ -148,6 +168,12 @@ class SAM2App:
 
         self.undo_point_btn = ttk.Button(parent, text="Undo Last Point", command=self.undo_last_point)
         self.undo_point_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.save_config_btn = ttk.Button(parent, text="Save Config", command=self.save_config)
+        self.save_config_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.load_config_btn = ttk.Button(parent, text="Load Config", command=self.load_config)
+        self.load_config_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
     def setup_analysis_controls(self, parent):
         device_frame = ttk.Frame(parent)
@@ -250,6 +276,10 @@ class SAM2App:
             self.input_entry.insert(0, self.config.input_dir)
             self.cleanup_temp_folders()  # Clean up temporary folders after confirming input folder
             self.show_raw_image()
+            image_files = get_image_files(self.config.input_dir)
+            if image_files:
+                self.preview_slider.config(to=len(image_files))
+                self.preview_label.config(text=f"1 / {len(image_files)}")
 
     def select_output(self):
         self.config.output_dir = filedialog.askdirectory(title="Select output folder")
@@ -382,6 +412,100 @@ class SAM2App:
             self.display_image()
         else:
             messagebox.showinfo("Info", "No points to undo.")
+
+    def prev_frame(self):
+        current = self.preview_index_var.get()
+        if current > 1:
+            self.preview_index_var.set(current - 1)
+            self._preview_frame(current - 1)
+
+    def next_frame(self):
+        current = self.preview_index_var.get()
+        image_files = get_image_files(self.config.input_dir)
+        if current < len(image_files):
+            self.preview_index_var.set(current + 1)
+            self._preview_frame(current + 1)
+
+    def _on_slider_change(self, value):
+        frame_idx = int(float(value))
+        self._preview_frame(frame_idx)
+
+    def _preview_frame(self, frame_idx):
+        """Load and display a specific frame for preview."""
+        if not self.config.input_dir:
+            return
+        image_files = get_image_files(self.config.input_dir)
+        if not image_files or frame_idx < 1 or frame_idx > len(image_files):
+            return
+        self.preview_label.config(text=f"{frame_idx} / {len(image_files)}")
+        image = load_image_as_rgb(image_files[frame_idx - 1])
+        if image is not None:
+            self.current_image = image
+            self.display_image()
+
+    def save_config(self):
+        """Save current annotation points and parameters to JSON file."""
+        if not self.config.input_points:
+            messagebox.showwarning("Warning", "No annotation points to save.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Save Annotation Config",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not filepath:
+            return
+
+        try:
+            save_annotation_config(
+                filepath=filepath,
+                input_points=self.config.input_points,
+                input_labels=self.config.input_labels,
+                model_name=self.model_var.get(),
+                device=self.device,
+                threshold=self.threshold_var.get(),
+                start_frame=int(self.start_index_entry.get() or 1),
+                end_frame=int(self.end_index_entry.get() or 0),
+                intermediate_format=self.intermediate_format_var.get(),
+            )
+            messagebox.showinfo("Success", f"Config saved to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save config: {e}")
+
+    def load_config(self):
+        """Load annotation points and parameters from JSON file."""
+        filepath = filedialog.askopenfilename(
+            title="Load Annotation Config",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not filepath:
+            return
+
+        try:
+            config = load_annotation_config(filepath)
+
+            # Restore annotation points
+            self.config.input_points = config["annotation"]["points"]
+            self.config.input_labels = config["annotation"]["labels"]
+
+            # Restore parameters if present
+            params = config.get("parameters", {})
+            if params.get("model"):
+                self.model_var.set(params["model"])
+            if params.get("threshold") is not None:
+                self.threshold_var.set(params["threshold"])
+            if params.get("start_frame"):
+                self.start_index_entry.delete(0, tk.END)
+                self.start_index_entry.insert(0, str(params["start_frame"]))
+            if params.get("end_frame"):
+                self.end_index_entry.delete(0, tk.END)
+                self.end_index_entry.insert(0, str(params["end_frame"]))
+
+            self.display_image()
+            messagebox.showinfo("Success", f"Loaded {len(self.config.input_points)} points from config")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load config: {e}")
 
     def update_image_with_points(self, ax=None):
         if ax is None:
