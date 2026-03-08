@@ -15,7 +15,9 @@ from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import build_sam2_video_predictor
 import shutil
-import time  
+import time
+from utils.dpi_scaling import DPIScaler
+from core.image_processing import get_image_files, load_image_as_rgb, extract_numbers, create_overlay
 
 # Set random seed
 np.random.seed(3)
@@ -25,11 +27,6 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 # Get the absolute path of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Helper functions
-def extract_numbers(file_name):
-    numbers = re.findall(r'\d+', file_name)
-    return tuple(map(int, numbers))
 
 # Device selection
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -52,8 +49,8 @@ class SAM2App:
         self.config = Config()
         matplotlib.use('TkAgg')
         
-        # Calculate DPI scale factor for matplotlib fonts
-        self.dpi_scale = self.get_dpi_scale_factor()
+        # Centralized DPI scaling
+        self.dpi = DPIScaler(master)
         
         self.current_image = None
         self.current_mask = None
@@ -74,39 +71,6 @@ class SAM2App:
         self.end_index = []
         self.start_index_previous = []
         self.end_index_previous = []
-    
-    def get_dpi_scale_factor(self):
-        """Get DPI scale factor for this instance - enhanced for 4K displays"""
-        try:
-            # Method 1: Use tkinter's DPI detection
-            dpi = self.master.winfo_fpixels('1i')
-            tkinter_scale = dpi / 96.0
-            
-            # Method 2: Get screen dimensions for additional validation
-            screen_width = self.master.winfo_screenwidth()
-            screen_height = self.master.winfo_screenheight()
-            
-            # For 4K displays, use more aggressive scaling
-            if screen_width >= 3840 or screen_height >= 2160:  # 4K or higher
-                # Ensure minimum 1.5x scaling for 4K displays
-                scale_factor = max(1.5, tkinter_scale)
-                # Allow higher scaling for very high DPI 4K displays
-                scale_factor = min(scale_factor, 3.0)
-            elif screen_width >= 2560 or screen_height >= 1440:  # 2K displays
-                scale_factor = max(1.2, tkinter_scale)
-                scale_factor = min(scale_factor, 2.0)
-            else:  # Standard displays
-                scale_factor = max(1.0, tkinter_scale)
-                scale_factor = min(scale_factor, 1.5)
-            
-            print(f"Screen resolution: {screen_width}x{screen_height}")
-            print(f"Detected DPI: {dpi:.1f}, Tkinter scale: {tkinter_scale:.2f}")
-            print(f"Applied scale factor: {scale_factor:.2f}")
-            
-            return scale_factor
-        except Exception as e:
-            print(f"DPI detection failed: {e}, using default scale 1.25 for safety")
-            return 1.25  # Conservative default for modern displays
     
     def setup_gui(self):
         main_frame = ttk.Frame(self.master, padding="10")
@@ -265,7 +229,7 @@ class SAM2App:
             print("CPU selected.")
 
     def show_raw_image(self):
-        image_files = self.get_image_files(self.config.input_dir)
+        image_files = get_image_files(self.config.input_dir)
         if not image_files:
             messagebox.showwarning("Warning", "No supported image files found in input directory.")
             return
@@ -281,123 +245,62 @@ class SAM2App:
             messagebox.showerror("Error", f"Start index must be between 1 and {len(image_files)}.")
             return
             
-        try:
-            # Calculate safe array index (convert from 1-based to 0-based)
-            array_index = self.start_index - 1
-            image_path = image_files[array_index]
-            
-            # Try to read image with OpenCV
-            self.current_image = cv2.imread(image_path)
-                
-            # If reading fails (e.g., 32-bit TIFF), try using PIL/Pillow
-            if self.current_image is None:
-                try:
-                    # Use PIL to read image
-                    pil_image = Image.open(image_path)
-                    
-                    # Convert to RGB mode (if not already)
-                    if pil_image.mode != 'RGB':
-                        pil_image = pil_image.convert('RGB')
-                    
-                    # Convert to numpy array
-                    self.current_image = np.array(pil_image)
-                    
-                    # PIL reads images in RGB order, no need for BGR to RGB conversion
-                except Exception as pil_error:
-                    messagebox.showerror("Error", f"Failed to load image with both OpenCV and PIL: {str(pil_error)}")
-                    print(f"PIL error loading image: {pil_error}")
-                    return
-            else:
-                # OpenCV reads images in BGR order, need to convert to RGB
-                self.current_image = cv2.cvtColor(self.current_image, cv2.COLOR_BGR2RGB)
-            
-            self.display_image()
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load image: {str(e)}")
-            print(f"Error loading image: {e}")
+        # Calculate safe array index (convert from 1-based to 0-based)
+        array_index = self.start_index - 1
+        image_path = image_files[array_index]
+
+        image = load_image_as_rgb(image_path)
+        if image is None:
+            messagebox.showerror("Error", f"Failed to load image: {image_path}")
+            return
+        self.current_image = image
+        self.display_image()
 
     def display_image(self, keep_points=False):
         if self.current_image is not None:
             # Panel 1: Original Image with Points
             self.ax1.clear()
             self.ax1.imshow(self.current_image)
-            # Enhanced font scaling for matplotlib based on screen resolution
-            screen_width = self.master.winfo_screenwidth()
-            if screen_width >= 3840:  # 4K displays
-                title_size = max(16, int(18 * self.dpi_scale))
-                label_size = max(12, int(14 * self.dpi_scale))
-            elif screen_width >= 2560:  # 2K displays
-                title_size = max(14, int(16 * self.dpi_scale))
-                label_size = max(10, int(12 * self.dpi_scale))
-            else:  # Standard displays
-                title_size = max(12, int(14 * self.dpi_scale))
-                label_size = max(10, int(12 * self.dpi_scale))
-            self.ax1.set_title('Original Image', fontsize=title_size, fontweight='bold', pad=10)
-            self.ax1.set_xlabel('X', fontsize=label_size)
-            self.ax1.set_ylabel('Y', fontsize=label_size)
+            sizes = self.dpi.matplotlib_sizes()
+            self.ax1.set_title('Original Image', fontsize=sizes['title'], fontweight='bold', pad=10)
+            self.ax1.set_xlabel('X', fontsize=sizes['label'])
+            self.ax1.set_ylabel('Y', fontsize=sizes['label'])
             
             # Always check if points should be retained
             if self.config.input_points:
                 self.update_image_with_points(self.ax1)
 
             # Panel 2: Generated Mask
-            if screen_width >= 3840:  # 4K displays
-                text_size = max(14, int(16 * self.dpi_scale))
-            elif screen_width >= 2560:  # 2K displays
-                text_size = max(12, int(14 * self.dpi_scale))
-            else:  # Standard displays
-                text_size = max(10, int(12 * self.dpi_scale))
             if self.current_masks is None:
                 self.ax2.clear()
-                self.ax2.set_title('Generated Mask', fontsize=title_size, fontweight='bold', pad=10)
-                self.ax2.text(0.5, 0.5, 'Mask will be\ndisplayed here', 
-                             ha='center', va='center', fontsize=text_size, 
+                self.ax2.set_title('Generated Mask', fontsize=sizes['title'], fontweight='bold', pad=10)
+                self.ax2.text(0.5, 0.5, 'Mask will be\ndisplayed here',
+                             ha='center', va='center', fontsize=sizes['text'],
                              transform=self.ax2.transAxes, color='gray')
                 self.ax2.axis('off')
             else:
                 self.ax2.clear()
                 self.ax2.imshow(self.current_masks[0], cmap='gray')
-                self.ax2.set_title('Generated Mask', fontsize=title_size, fontweight='bold', pad=10)
+                self.ax2.set_title('Generated Mask', fontsize=sizes['title'], fontweight='bold', pad=10)
                 self.ax2.axis('off')
 
             # Panel 3: Overlay View (Original + Mask)
             self.ax3.clear()
             if self.current_masks is not None:
-                # Create overlay: original image with semi-transparent mask
-                overlay_image = self.current_image.copy()
-                if len(overlay_image.shape) == 2:
-                    overlay_image = np.stack([overlay_image] * 3, axis=-1)
-                
-                # Create colored mask overlay (red tint on masked region)
-                mask_bool = self.current_masks[0] > 127
-                alpha = 0.4
-                blended = overlay_image.copy()
-                blended[mask_bool, 0] = np.clip(
-                    overlay_image[mask_bool, 0] * (1 - alpha) + 255 * alpha, 0, 255
-                ).astype(np.uint8)
-                blended[mask_bool, 1] = (overlay_image[mask_bool, 1] * (1 - alpha)).astype(np.uint8)
-                blended[mask_bool, 2] = (overlay_image[mask_bool, 2] * (1 - alpha)).astype(np.uint8)
-                
+                blended = create_overlay(self.current_image, self.current_masks[0])
                 self.ax3.imshow(blended)
-                self.ax3.set_title('Overlay View', fontsize=title_size, fontweight='bold', pad=10)
+                self.ax3.set_title('Overlay View', fontsize=sizes['title'], fontweight='bold', pad=10)
             else:
-                self.ax3.set_title('Overlay View', fontsize=title_size, fontweight='bold', pad=10)
-                self.ax3.text(0.5, 0.5, 'Overlay will be\ndisplayed here', 
-                             ha='center', va='center', fontsize=text_size, 
+                self.ax3.set_title('Overlay View', fontsize=sizes['title'], fontweight='bold', pad=10)
+                self.ax3.text(0.5, 0.5, 'Overlay will be\ndisplayed here',
+                             ha='center', va='center', fontsize=sizes['text'],
                              transform=self.ax3.transAxes, color='gray')
-            
+
             self.ax3.axis('off')
-            
+
             # Apply consistent styling with DPI scaling
-            if screen_width >= 3840:  # 4K displays
-                tick_size = max(10, int(12 * self.dpi_scale))
-            elif screen_width >= 2560:  # 2K displays
-                tick_size = max(8, int(10 * self.dpi_scale))
-            else:  # Standard displays
-                tick_size = max(7, int(9 * self.dpi_scale))
             for ax in [self.ax1, self.ax2, self.ax3]:
-                ax.tick_params(labelsize=tick_size)
+                ax.tick_params(labelsize=sizes['tick'])
                 
             self.canvas.draw()
 
@@ -436,42 +339,22 @@ class SAM2App:
 
         ax.clear()  # Clear the axes before redrawing
         ax.imshow(self.current_image)  # Redraw the current image
-        
-        # Enhanced DPI-aware font sizes for different screen resolutions
-        screen_width = self.master.winfo_screenwidth()
-        if screen_width >= 3840:  # 4K displays
-            title_size = max(16, int(18 * self.dpi_scale))
-            label_size = max(12, int(14 * self.dpi_scale))
-            legend_size = max(11, int(13 * self.dpi_scale))
-            tick_size = max(10, int(12 * self.dpi_scale))
-            point_size = max(100, int(120 * self.dpi_scale))
-        elif screen_width >= 2560:  # 2K displays
-            title_size = max(14, int(16 * self.dpi_scale))
-            label_size = max(10, int(12 * self.dpi_scale))
-            legend_size = max(9, int(11 * self.dpi_scale))
-            tick_size = max(8, int(10 * self.dpi_scale))
-            point_size = max(80, int(100 * self.dpi_scale))
-        else:  # Standard displays
-            title_size = max(12, int(14 * self.dpi_scale))
-            label_size = max(10, int(12 * self.dpi_scale))
-            legend_size = max(8, int(10 * self.dpi_scale))
-            tick_size = max(7, int(9 * self.dpi_scale))
-            point_size = max(70, int(90 * self.dpi_scale))
-        
-        ax.set_title('Original Image', fontsize=title_size, fontweight='bold', pad=10)
-        ax.set_xlabel('X', fontsize=label_size)
-        ax.set_ylabel('Y', fontsize=label_size)
+
+        sizes = self.dpi.matplotlib_sizes()
+        ax.set_title('Original Image', fontsize=sizes['title'], fontweight='bold', pad=10)
+        ax.set_xlabel('X', fontsize=sizes['label'])
+        ax.set_ylabel('Y', fontsize=sizes['label'])
 
         if self.config.input_points:
             points = np.array(self.config.input_points)
             labels = np.array(self.config.input_labels)
-            
+
             # Enhanced point visualization with DPI scaling
-            ax.scatter(points[labels == 1, 0], points[labels == 1, 1], 
-                      color='red', s=point_size, alpha=0.8, edgecolors='white', 
+            ax.scatter(points[labels == 1, 0], points[labels == 1, 1],
+                      color='red', s=sizes['point'], alpha=0.8, edgecolors='white',
                       linewidth=2, label='Foreground', marker='o')
-            ax.scatter(points[labels == 0, 0], points[labels == 0, 1], 
-                      color='blue', s=point_size, alpha=0.8, edgecolors='white', 
+            ax.scatter(points[labels == 0, 0], points[labels == 0, 1],
+                      color='blue', s=sizes['point'], alpha=0.8, edgecolors='white',
                       linewidth=2, label='Background', marker='s')
 
         # Clear the previous legend to avoid repetition
@@ -481,11 +364,11 @@ class SAM2App:
 
         # Enhanced legend styling with DPI scaling
         if self.config.input_points:
-            legend = ax.legend(loc='upper right', fontsize=legend_size, framealpha=0.9, 
+            legend = ax.legend(loc='upper right', fontsize=sizes['legend'], framealpha=0.9,
                              fancybox=True, shadow=True)
             legend.get_frame().set_facecolor('white')
 
-        ax.tick_params(labelsize=tick_size)
+        ax.tick_params(labelsize=sizes['tick'])
         self.canvas.draw()
 
     def update_progress(self, progress):
@@ -598,7 +481,7 @@ class SAM2App:
         input_folder_name = os.path.basename(self.config.input_dir)
         
         # Get image file list and sort
-        image_files = self.get_image_files(self.config.input_dir)
+        image_files = get_image_files(self.config.input_dir)
         total_images = len(image_files)
         
         if total_images == 0:
@@ -862,15 +745,6 @@ class SAM2App:
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
 
-    def get_image_files(self, directory):
-        image_extensions = ('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif', '.tif')
-        image_files = []
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                if file.lower().endswith(image_extensions):
-                    image_files.append(os.path.join(root, file))
-        return sorted(image_files, key=lambda x: extract_numbers(os.path.basename(x)))
-
     def cleanup_temp_folders(self):
         if not self.config.input_dir:
             return
@@ -903,82 +777,9 @@ class SAM2App:
         """Cleanup when application is destroyed"""
         self._cleanup_predictor()
 
-def get_dpi_scale_factor(root):
-    """Calculate DPI scale factor for high-DPI displays - enhanced for 4K"""
-    try:
-        # Get screen DPI
-        dpi = root.winfo_fpixels('1i')
-        tkinter_scale = dpi / 96.0
-        
-        # Get screen dimensions for better scaling decisions
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        
-        # Enhanced scaling logic for different display types
-        if screen_width >= 3840 or screen_height >= 2160:  # 4K or higher
-            scale_factor = max(1.5, tkinter_scale)
-            scale_factor = min(scale_factor, 3.0)
-        elif screen_width >= 2560 or screen_height >= 1440:  # 2K displays
-            scale_factor = max(1.2, tkinter_scale)
-            scale_factor = min(scale_factor, 2.0)
-        else:  # Standard displays
-            scale_factor = max(1.0, tkinter_scale)
-            scale_factor = min(scale_factor, 1.5)
-        
-        return scale_factor
-    except Exception:
-        return 1.25  # Better default for modern displays
-
-def configure_dpi_aware_fonts(root, style):
-    """Configure fonts that scale with DPI - enhanced for 4K displays"""
-    scale = get_dpi_scale_factor(root)
-    
-    # Enhanced base font sizes for better 4K support
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    
-    # Adjust base sizes based on screen resolution
-    if screen_width >= 3840 or screen_height >= 2160:  # 4K displays
-        base_font_size = 12  # Larger base for 4K
-        base_title_font_size = 14
-        base_button_padding = 12
-    elif screen_width >= 2560 or screen_height >= 1440:  # 2K displays
-        base_font_size = 10
-        base_title_font_size = 12
-        base_button_padding = 11
-    else:  # Standard displays
-        base_font_size = 9
-        base_title_font_size = 10
-        base_button_padding = 10
-    
-    # Calculate scaled sizes with improved minimums
-    font_size = max(10, int(base_font_size * scale))  # Higher minimum
-    title_font_size = max(12, int(base_title_font_size * scale))  # Higher minimum
-    button_padding = max(10, int(base_button_padding * scale))
-    progress_thickness = max(20, int(25 * scale))  # Thicker progress bar
-    
-    print(f"Screen: {screen_width}x{screen_height}")
-    print(f"DPI Scale Factor: {scale:.2f}")
-    print(f"Font Size: {font_size}pt, Title: {title_font_size}pt")
-    print(f"Button Padding: {button_padding}px")
-    
-    # Configure fonts with enhanced DPI scaling
-    style.configure('TLabel', font=('Segoe UI', font_size))
-    style.configure('TButton', font=('Segoe UI', font_size), padding=(button_padding, button_padding//2))
-    style.configure('TEntry', font=('Segoe UI', font_size), fieldbackground='white')
-    style.configure('TCombobox', font=('Segoe UI', font_size))
-    style.configure('TCheckbutton', font=('Segoe UI', font_size))
-    style.configure('TLabelFrame', font=('Segoe UI', font_size, 'bold'))
-    style.configure('TLabelFrame.Label', font=('Segoe UI', title_font_size, 'bold'))
-    
-    # Configure progress bar with enhanced scaling
-    style.configure('TProgressbar', thickness=progress_thickness)
-    
-    return scale
-
 if __name__ == "__main__":
     root = tk.Tk()
-    
+
     # Make the application DPI aware on Windows
     try:
         import ctypes
@@ -986,25 +787,18 @@ if __name__ == "__main__":
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass  # Ignore if not on Windows or if the call fails
-    
+
     # Configure modern UI styling with DPI awareness
     style = ttk.Style()
     style.theme_use('clam')
-    
-    # Configure DPI-aware fonts and get scale factor
-    scale_factor = configure_dpi_aware_fonts(root, style)
-    
-    # Scale window size based on DPI
-    base_width, base_height = 1400, 900
-    min_width, min_height = 1200, 700
-    
-    scaled_width = int(base_width * scale_factor)
-    scaled_height = int(base_height * scale_factor)
-    scaled_min_width = int(min_width * scale_factor)
-    scaled_min_height = int(min_height * scale_factor)
-    
-    root.geometry(f"{scaled_width}x{scaled_height}")
-    root.minsize(scaled_min_width, scaled_min_height)
+
+    # Configure DPI-aware fonts and window scaling
+    dpi_scaler = DPIScaler(root)
+    dpi_scaler.configure_ttk_style(style)
+
+    w, h, min_w, min_h = dpi_scaler.scaled_window_size()
+    root.geometry(f"{w}x{h}")
+    root.minsize(min_w, min_h)
     
     # Set window icon and title styling
     root.title("SAM2 Mask Generator - Professional Edition")
