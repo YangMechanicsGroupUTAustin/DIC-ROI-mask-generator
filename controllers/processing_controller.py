@@ -6,16 +6,15 @@ Worker receives immutable data snapshot at construction for thread safety.
 import os
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
+import cv2
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from core.mask_generator import MaskGenerator
-from core.image_processing import (
-    convert_image, create_overlay, get_image_files,
-    load_image_as_rgb, create_placeholder_image,
-)
+from core.image_processing import convert_image, get_image_dimensions
 
 logger = logging.getLogger("sam2studio.processing_controller")
 
@@ -33,7 +32,7 @@ class ProcessingWorker(QThread):
     Emits per-frame signals so GUI can update progressively.
     """
     progress = pyqtSignal(int, int, str)              # current, total, message
-    frame_processed = pyqtSignal(int, object, object)  # frame_idx, mask(ndarray), overlay(ndarray)
+    frame_processed = pyqtSignal(int, object)          # frame_idx, mask(ndarray)
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
@@ -81,8 +80,15 @@ class ProcessingWorker(QThread):
         except Exception as e:
             logger.exception("Processing failed")
             self.error.emit(str(e))
+            try:
+                self._mask_generator.cleanup()
+            except Exception:
+                logger.warning("Failed to cleanup mask generator after error")
         finally:
             self.finished.emit()
+
+    # SAM2 internally resizes to 1024; no benefit in feeding larger images
+    INFERENCE_MAX_SIZE = 1024
 
     def _run_pipeline(self):
         total_files = len(self._image_files)
@@ -90,42 +96,51 @@ class ProcessingWorker(QThread):
             self.error.emit("No image files found.")
             return
 
-        # Determine frame range (0-based internally)
         start_idx = self._start_frame - 1
-        end_idx = self._end_frame  # exclusive upper bound for range
 
-        # --- Stage 1: Convert images ---
+        # Get original image dimensions (for point scaling + mask upscaling)
+        orig_dims = get_image_dimensions(self._image_files[0])
+        if orig_dims is None:
+            self.error.emit("Cannot read first image dimensions.")
+            return
+        orig_h, orig_w = orig_dims
+
+        # --- Stage 1: Parallel convert + downsample ---
         fmt = "jpeg" if "jpeg" in self._intermediate_format.lower() else "png"
         ext = ".jpg" if fmt == "jpeg" else ".png"
         converted_dir = os.path.join(self._output_dir, f"converted_{fmt}")
         os.makedirs(converted_dir, exist_ok=True)
 
-        for i, img_path in enumerate(self._image_files):
-            if self._stop_event.is_set():
-                logger.info("Processing cancelled by user (stage 1)")
-                return
+        conversion_error = self._convert_images_parallel(
+            fmt, ext, converted_dir, total_files,
+        )
+        if conversion_error:
+            self.error.emit(conversion_error)
+            return
 
-            out_name = f"frame_{i:06d}{ext}"
-            out_path = os.path.join(converted_dir, out_name)
+        # Determine actual downsampled dimensions from converted file
+        first_converted = os.path.join(converted_dir, f"000000{ext}")
+        conv_dims = get_image_dimensions(first_converted)
+        conv_h, conv_w = conv_dims if conv_dims else (orig_h, orig_w)
 
-            if not self._force_reprocess and os.path.exists(out_path):
-                continue
+        scale_x = conv_w / orig_w
+        scale_y = conv_h / orig_h
+        needs_upscale = (conv_h != orig_h or conv_w != orig_w)
 
-            success = convert_image(img_path, out_path, format=fmt)
-            if not success:
-                self.error.emit(f"Failed to convert: {os.path.basename(img_path)}")
-                return
-
-            self.progress.emit(
-                i + 1, total_files,
-                f"Converting images ({i + 1}/{total_files})",
+        if needs_upscale:
+            logger.info(
+                f"Downsampled {orig_w}x{orig_h} -> {conv_w}x{conv_h} "
+                f"(scale: {scale_x:.3f}x{scale_y:.3f})"
             )
 
         # --- Stage 2: Initialize model ---
         if self._stop_event.is_set():
             return
 
-        self.progress.emit(0, 0, "Loading SAM2 model...")
+        if self._mask_generator.is_initialized:
+            self.progress.emit(0, 0, "Reusing loaded SAM2 model...")
+        else:
+            self.progress.emit(0, 0, "Loading SAM2 model...")
         self._mask_generator.initialize(
             model_cfg=self._model_cfg,
             checkpoint=self._checkpoint,
@@ -133,7 +148,7 @@ class ProcessingWorker(QThread):
             progress_callback=lambda msg: self.progress.emit(0, 0, msg),
         )
 
-        # --- Stage 3: Set video + add points ---
+        # --- Stage 3: Set video + add points (scaled to downsampled coords) ---
         if self._stop_event.is_set():
             return
 
@@ -142,73 +157,120 @@ class ProcessingWorker(QThread):
 
         if self._points and self._labels:
             points_arr = np.array(self._points, dtype=np.float32)
+            # Scale point coordinates from original to downsampled space
+            points_arr[:, 0] *= scale_x
+            points_arr[:, 1] *= scale_y
             labels_arr = np.array(self._labels, dtype=np.int32)
-            # Add points at the first frame of the range
             self._mask_generator.add_points(start_idx, points_arr, labels_arr)
 
-        # --- Stage 4: Propagate ---
-        if self._stop_event.is_set():
-            return
-
-        self.progress.emit(0, total_files, "Propagating masks...")
-
-        def on_propagation_progress(current, total):
-            if self._stop_event.is_set():
-                return
-            self.progress.emit(
-                current,
-                total if total > 0 else total_files,
-                f"Propagating ({current}/{total if total > 0 else '?'})",
-            )
-
-        video_segments = self._mask_generator.propagate(
-            threshold=self._threshold,
-            progress_callback=on_propagation_progress,
-        )
-
-        # --- Stage 5: Save masks + emit per-frame ---
+        # --- Stage 4+5: Propagate, upscale, save, preview per frame ---
         if self._stop_event.is_set():
             return
 
         mask_dir = os.path.join(self._output_dir, "masks")
         os.makedirs(mask_dir, exist_ok=True)
 
+        self.progress.emit(0, total_files, "Propagating masks...")
         processed_count = 0
-        for frame_idx in sorted(video_segments.keys()):
+
+        def on_frame(frame_idx: int, mask: np.ndarray) -> None:
+            nonlocal processed_count
             if self._stop_event.is_set():
-                logger.info("Processing cancelled by user (stage 5)")
                 return
 
-            mask = video_segments[frame_idx]
+            # Upscale mask to original resolution if downsampled
+            if needs_upscale:
+                mask = cv2.resize(
+                    mask, (orig_w, orig_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
 
-            # Save mask
-            mask_filename = f"mask_{frame_idx:06d}.tiff"
-            mask_path = os.path.join(mask_dir, mask_filename)
-            import cv2
+            mask_path = os.path.join(mask_dir, f"mask_{frame_idx:06d}.tiff")
             cv2.imwrite(mask_path, mask)
 
-            # Create overlay for display
-            if frame_idx < len(self._image_files):
-                original = load_image_as_rgb(self._image_files[frame_idx])
-                if original is not None:
-                    overlay = create_overlay(original, mask)
-                    self.frame_processed.emit(frame_idx, mask, overlay)
+            self.frame_processed.emit(frame_idx, mask)
 
             processed_count += 1
             self.progress.emit(
-                processed_count, len(video_segments),
-                f"Saving masks ({processed_count}/{len(video_segments)})",
+                processed_count, total_files,
+                f"Propagating & saving ({processed_count}/{total_files})",
             )
+
+        self._mask_generator.propagate(
+            threshold=self._threshold,
+            frame_callback=on_frame,
+            stop_check=self._stop_event.is_set,
+        )
 
         logger.info(f"Processing complete: {processed_count} masks saved to {mask_dir}")
 
+    def _convert_images_parallel(
+        self, fmt: str, ext: str, converted_dir: str, total_files: int,
+    ) -> str | None:
+        """Convert images in parallel using thread pool. Returns error msg or None."""
+        # Build list of (index, src_path, dst_path) for files needing conversion
+        tasks = []
+        for i, img_path in enumerate(self._image_files):
+            out_path = os.path.join(converted_dir, f"{i:06d}{ext}")
+            if not self._force_reprocess and os.path.exists(out_path):
+                continue
+            tasks.append((i, img_path, out_path))
+
+        if not tasks:
+            self.progress.emit(total_files, total_files, "Images already converted")
+            return None
+
+        completed = 0
+        # I/O bound task — use more threads than CPU cores
+        max_workers = min(8, len(tasks))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(
+                    convert_image, src, dst,
+                    format=fmt, max_size=self.INFERENCE_MAX_SIZE,
+                ): (idx, src)
+                for idx, src, dst in tasks
+            }
+            for future in as_completed(futures):
+                if self._stop_event.is_set():
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    return "cancelled"
+
+                idx, src = futures[future]
+                try:
+                    if not future.result():
+                        return f"Failed to convert: {os.path.basename(src)}"
+                except Exception as exc:
+                    if self._stop_event.is_set():
+                        return "cancelled"
+                    return f"Failed to convert: {os.path.basename(src)} ({exc})"
+
+                completed += 1
+                self.progress.emit(
+                    completed, len(tasks),
+                    f"Converting images ({completed}/{len(tasks)})",
+                )
+
+        return None
+
 
 class CorrectionWorker(QThread):
-    """Background worker for mid-sequence correction and re-propagation."""
+    """Background worker for mid-sequence correction and re-propagation.
+
+    Mirrors ProcessingWorker's approach:
+    - Scales points from original to downsampled coordinates
+    - Uses streaming frame_callback (no memory accumulation)
+    - Upscales masks to original resolution before saving
+    - Passes stop_check for cancellation support
+    - Uses start_frame_idx to only compute from correction frame forward
+    """
     progress = pyqtSignal(int, int, str)
-    frame_processed = pyqtSignal(int, object, object)
+    frame_processed = pyqtSignal(int, object)          # frame_idx, mask(ndarray)
     finished = pyqtSignal()
     error = pyqtSignal(str)
+
+    INFERENCE_MAX_SIZE = 1024
 
     def __init__(
         self,
@@ -219,6 +281,7 @@ class CorrectionWorker(QThread):
         threshold: float,
         image_files: list[str],
         output_dir: str,
+        intermediate_format: str,      # "JPEG (fast)" or "PNG (lossless)"
         parent=None,
     ):
         super().__init__(parent)
@@ -229,6 +292,7 @@ class CorrectionWorker(QThread):
         self._threshold = threshold
         self._image_files = list(image_files)
         self._output_dir = output_dir
+        self._intermediate_format = intermediate_format
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -249,43 +313,81 @@ class CorrectionWorker(QThread):
             self.error.emit("Model not initialized. Run full processing first.")
             return
 
+        if not self._image_files:
+            self.error.emit("No image files available.")
+            return
+
+        # Determine scale factors between original and downsampled resolution
+        orig_dims = get_image_dimensions(self._image_files[0])
+        if orig_dims is None:
+            self.error.emit("Cannot read image dimensions.")
+            return
+        orig_h, orig_w = orig_dims
+
+        fmt = "jpeg" if "jpeg" in self._intermediate_format.lower() else "png"
+        ext = ".jpg" if fmt == "jpeg" else ".png"
+        converted_dir = os.path.join(self._output_dir, f"converted_{fmt}")
+        first_converted = os.path.join(converted_dir, f"000000{ext}")
+
+        conv_dims = get_image_dimensions(first_converted)
+        conv_h, conv_w = conv_dims if conv_dims else (orig_h, orig_w)
+
+        scale_x = conv_w / orig_w
+        scale_y = conv_h / orig_h
+        needs_upscale = (conv_h != orig_h or conv_w != orig_w)
+
+        # Scale correction points from original to downsampled coordinates
         self.progress.emit(0, 0, "Adding correction points...")
         points_arr = np.array(self._points, dtype=np.float32)
+        points_arr[:, 0] *= scale_x
+        points_arr[:, 1] *= scale_y
         labels_arr = np.array(self._labels, dtype=np.int32)
         self._mask_generator.add_correction(self._frame_idx, points_arr, labels_arr)
 
-        self.progress.emit(0, 0, "Re-propagating from correction frame...")
-        segments = self._mask_generator.propagate_from(
-            start_frame_idx=self._frame_idx,
-            threshold=self._threshold,
-        )
+        if self._stop_event.is_set():
+            return
 
+        # Stream propagation from correction frame with frame_callback
         mask_dir = os.path.join(self._output_dir, "masks")
         os.makedirs(mask_dir, exist_ok=True)
 
-        count = 0
-        for idx in sorted(segments.keys()):
+        total_remaining = len(self._image_files) - self._frame_idx
+        processed_count = 0
+
+        self.progress.emit(0, total_remaining,
+                           f"Re-propagating from frame {self._frame_idx}...")
+
+        def on_frame(frame_idx: int, mask: np.ndarray) -> None:
+            nonlocal processed_count
             if self._stop_event.is_set():
                 return
 
-            mask = segments[idx]
-            mask_path = os.path.join(mask_dir, f"mask_{idx:06d}.tiff")
-            import cv2
+            # Upscale mask to original resolution if downsampled
+            if needs_upscale:
+                mask = cv2.resize(
+                    mask, (orig_w, orig_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+
+            mask_path = os.path.join(mask_dir, f"mask_{frame_idx:06d}.tiff")
             cv2.imwrite(mask_path, mask)
 
-            if idx < len(self._image_files):
-                original = load_image_as_rgb(self._image_files[idx])
-                if original is not None:
-                    overlay = create_overlay(original, mask)
-                    self.frame_processed.emit(idx, mask, overlay)
+            self.frame_processed.emit(frame_idx, mask)
 
-            count += 1
+            processed_count += 1
             self.progress.emit(
-                count, len(segments),
-                f"Re-propagating ({count}/{len(segments)})",
+                processed_count, total_remaining,
+                f"Re-propagating ({processed_count}/{total_remaining})",
             )
 
-        logger.info(f"Correction complete: {count} frames updated")
+        self._mask_generator.propagate_from(
+            start_frame_idx=self._frame_idx,
+            threshold=self._threshold,
+            frame_callback=on_frame,
+            stop_check=self._stop_event.is_set,
+        )
+
+        logger.info(f"Correction complete: {processed_count} frames updated from frame {self._frame_idx}")
 
 
 class ProcessingController(QObject):
@@ -296,7 +398,7 @@ class ProcessingController(QObject):
     """
     # Forward signals from workers for GUI consumption
     progress = pyqtSignal(int, int, str)
-    frame_processed = pyqtSignal(int, object, object)
+    frame_processed = pyqtSignal(int, object)           # frame_idx, mask
     processing_finished = pyqtSignal()
     processing_error = pyqtSignal(str)
 
@@ -358,6 +460,7 @@ class ProcessingController(QObject):
             threshold=self._state.threshold,
             image_files=self._state.image_files,
             output_dir=self._state.output_dir,
+            intermediate_format=self._state.intermediate_format,
         )
         self._connect_worker(worker)
         self._worker = worker
@@ -371,7 +474,19 @@ class ProcessingController(QObject):
             logger.info("Stop requested")
 
     def _connect_worker(self, worker: QThread) -> None:
-        """Connect worker signals to controller signals."""
+        """Connect worker signals to controller signals.
+
+        Disconnects any previous worker first to prevent duplicate connections.
+        """
+        if self._worker is not None:
+            try:
+                self._worker.progress.disconnect(self.progress)
+                self._worker.frame_processed.disconnect(self.frame_processed)
+                self._worker.finished.disconnect(self._on_finished)
+                self._worker.error.disconnect(self.processing_error)
+            except (TypeError, RuntimeError):
+                pass  # Already disconnected or destroyed
+
         worker.progress.connect(self.progress)
         worker.frame_processed.connect(self.frame_processed)
         worker.finished.connect(self._on_finished)

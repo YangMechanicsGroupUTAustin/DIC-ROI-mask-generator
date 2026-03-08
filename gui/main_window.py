@@ -550,6 +550,7 @@ class MainWindow(QMainWindow):
         """Stop the current processing operation."""
         if self._processing is not None and self._processing.is_running:
             self._processing.stop_processing()
+            self._status_bar.set_status("Stopping...", "processing")
         if self._smoothing is not None and self._smoothing.is_running:
             self._smoothing.stop()
 
@@ -694,13 +695,48 @@ class MainWindow(QMainWindow):
         """Update status bar with processing progress."""
         self._status_bar.set_status(message, "processing")
 
-    def _on_frame_processed(
-        self, frame_idx: int, mask, overlay
-    ) -> None:
-        """Update display when a frame is processed."""
-        # Show the most recently processed frame
-        if self._state is not None:
-            self._state.set_display_images(mask=mask, overlay=overlay)
+    def _on_frame_processed(self, frame_idx: int, mask) -> None:
+        """Update all three panels during propagation.
+
+        Loads display-sized original from converted JPEG (fast, ~100KB local)
+        and creates overlay at display resolution. Full-resolution originals
+        are only loaded during annotation/correction, not during propagation.
+        """
+        if self._state is None:
+            return
+
+        import os
+        import cv2
+        from core.image_processing import load_image_as_rgb, create_overlay
+
+        # Load display-sized original from converted JPEG (already on local disk)
+        output_dir = self._state.output_dir
+        fmt = "jpeg" if "jpeg" in self._state.intermediate_format.lower() else "png"
+        ext = ".jpg" if fmt == "jpeg" else ".png"
+        display_path = os.path.join(
+            output_dir, f"converted_{fmt}", f"{frame_idx:06d}{ext}"
+        )
+
+        display_original = None
+        if os.path.exists(display_path):
+            display_original = load_image_as_rgb(display_path)
+
+        if display_original is not None:
+            # Upscale display image to match mask resolution (original res)
+            # so scene rect stays consistent and annotation points remain valid
+            mh, mw = mask.shape[:2]
+            dh, dw = display_original.shape[:2]
+            if (dh, dw) != (mh, mw):
+                display_original = cv2.resize(
+                    display_original, (mw, mh),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            overlay = create_overlay(display_original, mask)
+            self._state.set_display_images(
+                original=display_original, mask=mask, overlay=overlay,
+            )
+        else:
+            self._state.set_display_images(mask=mask)
 
     def _on_processing_finished(self) -> None:
         """Handle processing completion."""

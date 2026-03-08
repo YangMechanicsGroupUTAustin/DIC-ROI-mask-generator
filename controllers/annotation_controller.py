@@ -72,10 +72,12 @@ class RemovePointCommand(Command):
         state.remove_point(self._index)
 
     def undo(self, state) -> None:
-        # Re-insert at original position
-        state._points.insert(self._index, self._point)
-        state._labels.insert(self._index, self._label)
-        state.points_changed.emit(state._points, state._labels)
+        # Re-insert at original position via public API
+        new_points = list(state.points)
+        new_labels = list(state.labels)
+        new_points.insert(self._index, self._point)
+        new_labels.insert(self._index, self._label)
+        state.set_points(new_points, new_labels)
 
     def description(self) -> str:
         return f"Remove point {self._index}"

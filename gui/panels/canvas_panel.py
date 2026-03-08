@@ -35,8 +35,9 @@ from gui.icons import get_icon, get_pixmap
 from gui.theme import Colors, Fonts
 
 
-# Annotation point radius in image-space pixels
-_POINT_RADIUS = 5.0
+# Annotation point radius as fraction of image's longest dimension
+_POINT_RADIUS_FRACTION = 0.005  # 0.5%
+_POINT_RADIUS_DEFAULT = 5.0    # fallback before image is loaded
 _POINT_COLORS = {
     1: QColor(Colors.FG_POINT),  # Foreground (emerald)
     0: QColor(Colors.BG_POINT),  # Background (rose)
@@ -46,16 +47,16 @@ _POINT_COLORS = {
 class _AnnotationPointItem(QGraphicsEllipseItem):
     """A draggable annotation point drawn on the image."""
 
-    def __init__(self, x: float, y: float, label: int, index: int):
-        r = _POINT_RADIUS
-        super().__init__(-r, -r, 2 * r, 2 * r)
+    def __init__(self, x: float, y: float, label: int, index: int, radius: float):
+        super().__init__(-radius, -radius, 2 * radius, 2 * radius)
         self.setPos(x, y)
         self.index = index
         self.label = label
 
         color = _POINT_COLORS.get(label, _POINT_COLORS[1])
         self.setBrush(QBrush(color))
-        self.setPen(QPen(QColor("white"), 1.5))
+        pen_width = max(1.0, radius * 0.3)
+        self.setPen(QPen(QColor("white"), pen_width))
         self.setZValue(100)
         self.setFlags(
             QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable
@@ -217,6 +218,7 @@ class CanvasPanel(QWidget):
         self._show_overlay = True
         self._annotation_items: list[_AnnotationPointItem] = []
         self._has_image = False
+        self._point_radius = _POINT_RADIUS_DEFAULT
 
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -326,7 +328,7 @@ class CanvasPanel(QWidget):
             h, w = image.shape
             qimg = QImage(
                 image.data.tobytes(), w, h, w, QImage.Format.Format_Grayscale8
-            )
+            ).copy()
         else:
             h, w, ch = image.shape
             bytes_per_line = ch * w
@@ -334,16 +336,20 @@ class CanvasPanel(QWidget):
                 qimg = QImage(
                     image.data.tobytes(), w, h, bytes_per_line,
                     QImage.Format.Format_RGB888,
-                )
+                ).copy()
             else:
                 qimg = QImage(
                     image.data.tobytes(), w, h, bytes_per_line,
                     QImage.Format.Format_RGBA8888,
-                )
+                ).copy()
 
         pixmap = QPixmap.fromImage(qimg)
         self._pixmap_item.setPixmap(pixmap)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
+
+        # Update point radius based on image dimensions
+        longest = max(pixmap.width(), pixmap.height())
+        self._point_radius = longest * _POINT_RADIUS_FRACTION
 
         self._has_image = True
         self._view.setVisible(True)
@@ -358,7 +364,7 @@ class CanvasPanel(QWidget):
         """Update annotation point overlay."""
         self._clear_annotation_items()
         for i, (pt, lbl) in enumerate(zip(points, labels)):
-            item = _AnnotationPointItem(pt[0], pt[1], lbl, i)
+            item = _AnnotationPointItem(pt[0], pt[1], lbl, i, self._point_radius)
             self._scene.addItem(item)
             self._annotation_items.append(item)
 

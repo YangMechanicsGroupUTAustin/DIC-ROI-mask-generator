@@ -55,7 +55,8 @@ class SpatialSmoothWorker(QThread):
         except Exception as e:
             logger.exception("Spatial smoothing failed")
             self.error.emit(str(e))
-            self.finished.emit(self._output_dir)
+            return  # Do NOT emit finished on error
+        self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
         import cv2
@@ -132,7 +133,8 @@ class TemporalSmoothWorker(QThread):
         except Exception as e:
             logger.exception("Temporal smoothing failed")
             self.error.emit(str(e))
-            self.finished.emit(self._output_dir)
+            return  # Do NOT emit finished on error
+        self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
         import cv2
@@ -259,21 +261,37 @@ class SmoothingController(QObject):
             self._worker.stop()
             logger.info("Smoothing stop requested")
 
+    def _disconnect_previous_worker(self) -> None:
+        """Disconnect signals from previous worker to prevent duplicates."""
+        if self._worker is not None:
+            try:
+                self._worker.finished.disconnect(self._on_finished)
+                self._worker.error.disconnect(self.smoothing_error)
+            except (TypeError, RuntimeError):
+                pass
+
     def _connect_worker_spatial(self, worker: SpatialSmoothWorker) -> None:
+        self._disconnect_previous_worker()
         worker.progress.connect(
             lambda cur, tot: self.progress.emit(
                 cur, tot, f"Spatial smoothing ({cur}/{tot})"
             )
         )
         worker.finished.connect(self._on_finished)
-        worker.error.connect(self.smoothing_error)
+        worker.error.connect(self._on_error)
 
     def _connect_worker_temporal(self, worker: TemporalSmoothWorker) -> None:
+        self._disconnect_previous_worker()
         worker.progress.connect(self.progress)
         worker.finished.connect(self._on_finished)
-        worker.error.connect(self.smoothing_error)
+        worker.error.connect(self._on_error)
 
     def _on_finished(self, output_dir: str) -> None:
         self._worker = None
         self.smoothing_finished.emit(output_dir)
         logger.info(f"Smoothing finished: {output_dir}")
+
+    def _on_error(self, error_msg: str) -> None:
+        """Clean up worker reference on error."""
+        self._worker = None
+        self.smoothing_error.emit(error_msg)
