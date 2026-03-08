@@ -12,6 +12,8 @@ from typing import Optional
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from core.preprocessing import PreprocessingConfig
+
 
 class AppState(QObject):
     """Central application state manager."""
@@ -41,6 +43,7 @@ class AppState(QObject):
     processing_finished = pyqtSignal()
     processing_error = pyqtSignal(str)
     current_images_changed = pyqtSignal()          # original/mask/overlay updated
+    preprocessing_changed = pyqtSignal()           # preprocessing config updated
     vram_updated = pyqtSignal(float, float)        # used_gb, total_gb
     status_message = pyqtSignal(str, str)          # message, level (ready/processing/error/warning)
 
@@ -77,6 +80,9 @@ class AppState(QObject):
         self._threshold = 0.0
         self._intermediate_format = "JPEG (fast)"
         self._force_reprocess = False
+
+        # Preprocessing
+        self._preprocessing_config = PreprocessingConfig()
 
         # Display images (numpy arrays, RGB uint8)
         self._current_original: Optional[np.ndarray] = None
@@ -248,6 +254,14 @@ class AppState(QObject):
 
     def set_force_reprocess(self, value: bool) -> None:
         self._force_reprocess = value
+
+    @property
+    def preprocessing_config(self) -> PreprocessingConfig:
+        return self._preprocessing_config
+
+    def set_preprocessing_config(self, config: PreprocessingConfig) -> None:
+        self._preprocessing_config = config
+        self.preprocessing_changed.emit()
 
     # --- Display images ---
 
