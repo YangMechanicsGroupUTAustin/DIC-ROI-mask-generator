@@ -5,6 +5,7 @@ Worker receives immutable data snapshot at construction for thread safety.
 """
 import os
 import logging
+import threading
 from typing import Optional
 
 import numpy as np
@@ -68,11 +69,11 @@ class ProcessingWorker(QThread):
         self._end_frame = end_frame
         self._intermediate_format = intermediate_format
         self._force_reprocess = force_reprocess
-        self._stop_flag = False
+        self._stop_event = threading.Event()
 
     def stop(self):
-        """Request graceful cancellation."""
-        self._stop_flag = True
+        """Request graceful cancellation (thread-safe)."""
+        self._stop_event.set()
 
     def run(self):
         try:
@@ -100,7 +101,7 @@ class ProcessingWorker(QThread):
         os.makedirs(converted_dir, exist_ok=True)
 
         for i, img_path in enumerate(self._image_files):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 logger.info("Processing cancelled by user (stage 1)")
                 return
 
@@ -121,7 +122,7 @@ class ProcessingWorker(QThread):
             )
 
         # --- Stage 2: Initialize model ---
-        if self._stop_flag:
+        if self._stop_event.is_set():
             return
 
         self.progress.emit(0, 0, "Loading SAM2 model...")
@@ -133,7 +134,7 @@ class ProcessingWorker(QThread):
         )
 
         # --- Stage 3: Set video + add points ---
-        if self._stop_flag:
+        if self._stop_event.is_set():
             return
 
         self.progress.emit(0, 0, "Initializing video predictor...")
@@ -146,13 +147,13 @@ class ProcessingWorker(QThread):
             self._mask_generator.add_points(start_idx, points_arr, labels_arr)
 
         # --- Stage 4: Propagate ---
-        if self._stop_flag:
+        if self._stop_event.is_set():
             return
 
         self.progress.emit(0, total_files, "Propagating masks...")
 
         def on_propagation_progress(current, total):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 return
             self.progress.emit(
                 current,
@@ -166,7 +167,7 @@ class ProcessingWorker(QThread):
         )
 
         # --- Stage 5: Save masks + emit per-frame ---
-        if self._stop_flag:
+        if self._stop_event.is_set():
             return
 
         mask_dir = os.path.join(self._output_dir, "masks")
@@ -174,7 +175,7 @@ class ProcessingWorker(QThread):
 
         processed_count = 0
         for frame_idx in sorted(video_segments.keys()):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 logger.info("Processing cancelled by user (stage 5)")
                 return
 
@@ -228,10 +229,11 @@ class CorrectionWorker(QThread):
         self._threshold = threshold
         self._image_files = list(image_files)
         self._output_dir = output_dir
-        self._stop_flag = False
+        self._stop_event = threading.Event()
 
     def stop(self):
-        self._stop_flag = True
+        """Request graceful cancellation (thread-safe)."""
+        self._stop_event.set()
 
     def run(self):
         try:
@@ -263,7 +265,7 @@ class CorrectionWorker(QThread):
 
         count = 0
         for idx in sorted(segments.keys()):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 return
 
             mask = segments[idx]

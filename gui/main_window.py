@@ -119,25 +119,29 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Warn user if processing is still running before closing."""
-        if self._processing is not None and self._processing.is_running:
-            reply = QMessageBox.question(
-                self,
-                "Processing Running",
-                "Processing is still running. Stop and exit?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self._processing.stop_processing()
-                if (
-                    self._smoothing is not None
-                    and self._smoothing.is_running
-                ):
-                    self._smoothing.stop()
-                event.accept()
-            else:
-                event.ignore()
-                return
+        try:
+            if self._processing is not None and self._processing.is_running:
+                reply = QMessageBox.question(
+                    self,
+                    "Processing Running",
+                    "Processing is still running. Stop and exit?",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._processing.stop_processing()
+                    if (
+                        self._smoothing is not None
+                        and self._smoothing.is_running
+                    ):
+                        self._smoothing.stop()
+                    event.accept()
+                else:
+                    event.ignore()
+                    return
+        except RuntimeError:
+            # Qt objects may be partially destroyed during app shutdown
+            pass
         event.accept()
 
     # --- Properties for external access ---

@@ -129,8 +129,8 @@ class TestProcessingWorker:
         assert len(worker._labels) == 2
         assert len(worker._image_files) == 2
 
-    def test_worker_stop_flag(self, qapp, mock_mask_generator):
-        """Stop flag should be settable."""
+    def test_worker_stop_event(self, qapp, mock_mask_generator):
+        """Stop event should be settable (thread-safe)."""
         from controllers.processing_controller import ProcessingWorker
 
         worker = ProcessingWorker(
@@ -147,9 +147,9 @@ class TestProcessingWorker:
             end_frame=1,
             intermediate_format="JPEG (fast)",
         )
-        assert worker._stop_flag is False
+        assert not worker._stop_event.is_set()
         worker.stop()
-        assert worker._stop_flag is True
+        assert worker._stop_event.is_set()
 
     def test_worker_emits_error_on_empty_files(self, qapp, mock_mask_generator):
         """Worker should emit error when no image files provided."""

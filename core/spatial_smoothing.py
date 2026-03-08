@@ -48,11 +48,17 @@ def perona_malik_smooth(
         u = u / 255.0
 
     for iteration in range(num_iterations):
-        # Forward differences in 4 directions
+        # Forward differences in 4 directions with Neumann boundary (zero gradient)
         delta_n = np.roll(u, -1, axis=0) - u  # North
         delta_s = np.roll(u, 1, axis=0) - u   # South
         delta_e = np.roll(u, -1, axis=1) - u  # East
         delta_w = np.roll(u, 1, axis=1) - u   # West
+
+        # Zero out wrapped boundaries to prevent edge artifacts
+        delta_n[-1, :] = 0
+        delta_s[0, :] = 0
+        delta_e[:, -1] = 0
+        delta_w[:, 0] = 0
 
         # Diffusion coefficients per direction
         if option == 1:

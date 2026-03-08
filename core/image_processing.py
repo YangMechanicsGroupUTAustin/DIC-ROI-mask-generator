@@ -66,7 +66,11 @@ def _normalize_image(img_path: str) -> np.ndarray | None:
     img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
 
     if img is None:
-        pil_image = Image.open(img_path)
+        try:
+            pil_image = Image.open(img_path)
+        except Exception as e:
+            logger.error(f"Failed to open image with PIL: {img_path}: {e}")
+            return None
         if pil_image.mode in ('F', 'I', 'I;16', 'I;32'):
             img_array = np.array(pil_image)
             min_val, max_val = np.min(img_array), np.max(img_array)

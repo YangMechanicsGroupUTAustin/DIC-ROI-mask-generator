@@ -5,6 +5,7 @@ Provides background workers for spatial (Perona-Malik) and temporal
 """
 import os
 import logging
+import threading
 from typing import Optional
 
 import numpy as np
@@ -42,10 +43,11 @@ class SpatialSmoothWorker(QThread):
         self._kappa = kappa
         self._option = option
         self._post_gaussian_sigma = post_gaussian_sigma
-        self._stop_flag = False
+        self._stop_event = threading.Event()
 
     def stop(self):
-        self._stop_flag = True
+        """Request graceful cancellation (thread-safe)."""
+        self._stop_event.set()
 
     def run(self):
         try:
@@ -53,6 +55,7 @@ class SpatialSmoothWorker(QThread):
         except Exception as e:
             logger.exception("Spatial smoothing failed")
             self.error.emit(str(e))
+            self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
         import cv2
@@ -66,7 +69,7 @@ class SpatialSmoothWorker(QThread):
         total = len(mask_files)
 
         for i, mask_path in enumerate(mask_files):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 logger.info("Spatial smoothing cancelled")
                 return
 
@@ -117,10 +120,11 @@ class TemporalSmoothWorker(QThread):
         self._sigma = sigma
         self._num_neighbors = num_neighbors
         self._variance_threshold = variance_threshold
-        self._stop_flag = False
+        self._stop_event = threading.Event()
 
     def stop(self):
-        self._stop_flag = True
+        """Request graceful cancellation (thread-safe)."""
+        self._stop_event.set()
 
     def run(self):
         try:
@@ -128,6 +132,7 @@ class TemporalSmoothWorker(QThread):
         except Exception as e:
             logger.exception("Temporal smoothing failed")
             self.error.emit(str(e))
+            self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
         import cv2
@@ -142,7 +147,7 @@ class TemporalSmoothWorker(QThread):
         # Load all masks
         frames = []
         for i, path in enumerate(mask_files):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 return
             mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if mask is None:
@@ -167,7 +172,7 @@ class TemporalSmoothWorker(QThread):
 
         # Save results
         for i, smoothed in enumerate(smoothed_frames):
-            if self._stop_flag:
+            if self._stop_event.is_set():
                 return
             out_name = os.path.basename(mask_files[i])
             out_path = os.path.join(self._output_dir, out_name)
