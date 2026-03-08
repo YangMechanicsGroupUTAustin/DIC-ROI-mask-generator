@@ -1,0 +1,907 @@
+"""Phase 5 verification: processing and smoothing controllers.
+
+Tests background workers (ProcessingWorker, CorrectionWorker,
+SpatialSmoothWorker, TemporalSmoothWorker) and their controller
+orchestrators (ProcessingController, SmoothingController).
+
+Uses unittest.mock to avoid SAM2 model dependencies.
+Requires PyQt6 and QApplication for signal tests.
+"""
+import os
+import sys
+import tempfile
+from unittest.mock import MagicMock, patch, PropertyMock
+
+import cv2
+import numpy as np
+import pytest
+from PyQt6.QtCore import QThread
+from PyQt6.QtWidgets import QApplication
+
+
+# --- Fixtures ---
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication(sys.argv)
+    return app
+
+
+@pytest.fixture
+def state(qapp):
+    from controllers.app_state import AppState
+    s = AppState()
+    return s
+
+
+@pytest.fixture
+def mock_mask_generator():
+    """Create a MaskGenerator mock with standard behavior."""
+    mg = MagicMock()
+    mg.is_initialized = False
+    mg.has_inference_state = False
+    mg.initialize = MagicMock()
+    mg.set_video = MagicMock()
+    mg.add_points = MagicMock()
+    mg.cleanup = MagicMock()
+
+    def fake_propagate(threshold=0.0, progress_callback=None):
+        segments = {}
+        for i in range(3):
+            mask = np.zeros((50, 50), dtype=np.uint8)
+            mask[10:40, 10:40] = 255
+            segments[i] = mask
+            if progress_callback:
+                progress_callback(i + 1, 3)
+        return segments
+
+    mg.propagate = MagicMock(side_effect=fake_propagate)
+
+    def fake_propagate_from(start_frame_idx=0, threshold=0.0, progress_callback=None):
+        all_seg = fake_propagate(threshold, progress_callback)
+        return {k: v for k, v in all_seg.items() if k >= start_frame_idx}
+
+    mg.propagate_from = MagicMock(side_effect=fake_propagate_from)
+    mg.add_correction = MagicMock()
+
+    return mg
+
+
+@pytest.fixture
+def tmp_image_dir():
+    """Create a temporary directory with small test images."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(3):
+            img = np.random.randint(0, 255, (50, 50, 3), dtype=np.uint8)
+            path = os.path.join(tmpdir, f"img_{i:03d}.png")
+            cv2.imwrite(path, img)
+        yield tmpdir
+
+
+@pytest.fixture
+def tmp_mask_dir():
+    """Create a temporary directory with small binary mask files."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(5):
+            mask = np.zeros((50, 50), dtype=np.uint8)
+            mask[15:35, 15:35] = 255
+            path = os.path.join(tmpdir, f"mask_{i:03d}.tiff")
+            cv2.imwrite(path, mask)
+        yield tmpdir
+
+
+# =============================================================================
+# ProcessingWorker Tests
+# =============================================================================
+
+class TestProcessingWorker:
+    """Tests for the full mask generation pipeline worker."""
+
+    def test_worker_copies_data_at_construction(self, qapp, mock_mask_generator):
+        """Worker should snapshot input data for thread safety."""
+        from controllers.processing_controller import ProcessingWorker
+
+        original_points = [[10.0, 20.0], [30.0, 40.0]]
+        original_labels = [1, 0]
+        original_files = ["/a.png", "/b.png"]
+
+        worker = ProcessingWorker(
+            mask_generator=mock_mask_generator,
+            image_files=original_files,
+            output_dir="/tmp/out",
+            model_cfg="test.yaml",
+            checkpoint="test.pt",
+            device="cpu",
+            points=original_points,
+            labels=original_labels,
+            threshold=0.0,
+            start_frame=1,
+            end_frame=2,
+            intermediate_format="JPEG (fast)",
+        )
+
+        # Mutate originals -- worker copies should be unaffected
+        original_points.append([99.0, 99.0])
+        original_labels.append(1)
+        original_files.append("/c.png")
+
+        assert len(worker._points) == 2
+        assert len(worker._labels) == 2
+        assert len(worker._image_files) == 2
+
+    def test_worker_stop_flag(self, qapp, mock_mask_generator):
+        """Stop flag should be settable."""
+        from controllers.processing_controller import ProcessingWorker
+
+        worker = ProcessingWorker(
+            mask_generator=mock_mask_generator,
+            image_files=[],
+            output_dir="/tmp/out",
+            model_cfg="test.yaml",
+            checkpoint="test.pt",
+            device="cpu",
+            points=[],
+            labels=[],
+            threshold=0.0,
+            start_frame=1,
+            end_frame=1,
+            intermediate_format="JPEG (fast)",
+        )
+        assert worker._stop_flag is False
+        worker.stop()
+        assert worker._stop_flag is True
+
+    def test_worker_emits_error_on_empty_files(self, qapp, mock_mask_generator):
+        """Worker should emit error when no image files provided."""
+        from controllers.processing_controller import ProcessingWorker
+
+        worker = ProcessingWorker(
+            mask_generator=mock_mask_generator,
+            image_files=[],
+            output_dir="/tmp/out",
+            model_cfg="test.yaml",
+            checkpoint="test.pt",
+            device="cpu",
+            points=[],
+            labels=[],
+            threshold=0.0,
+            start_frame=1,
+            end_frame=1,
+            intermediate_format="JPEG (fast)",
+        )
+
+        errors = []
+        finished_signals = []
+        worker.error.connect(lambda msg: errors.append(msg))
+        worker.finished.connect(lambda: finished_signals.append(True))
+
+        worker.run()  # run synchronously for testing
+
+        assert len(errors) == 1
+        assert "No image files" in errors[0]
+        assert len(finished_signals) == 1  # finished always emits
+
+    def test_worker_full_pipeline(self, qapp, mock_mask_generator, tmp_image_dir):
+        """Worker should run all 5 stages with mocked model."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+            )
+
+            progress_msgs = []
+            frame_signals = []
+            finished_signals = []
+            worker.progress.connect(
+                lambda c, t, m: progress_msgs.append((c, t, m))
+            )
+            worker.frame_processed.connect(
+                lambda idx, mask, overlay: frame_signals.append(idx)
+            )
+            worker.finished.connect(lambda: finished_signals.append(True))
+
+            worker.run()
+
+            # Model methods should have been called
+            mock_mask_generator.initialize.assert_called_once()
+            mock_mask_generator.set_video.assert_called_once()
+            mock_mask_generator.add_points.assert_called_once()
+            mock_mask_generator.propagate.assert_called_once()
+
+            # Should have progress messages
+            assert len(progress_msgs) > 0
+
+            # Should have frame signals for each propagated mask
+            assert len(frame_signals) == 3
+
+            # Masks should be saved
+            mask_dir = os.path.join(output_dir, "masks")
+            assert os.path.isdir(mask_dir)
+            mask_files = [f for f in os.listdir(mask_dir) if f.endswith(".tiff")]
+            assert len(mask_files) == 3
+
+            # finished should fire
+            assert len(finished_signals) == 1
+
+    def test_worker_png_format(self, qapp, mock_mask_generator, tmp_image_dir):
+        """Worker should use PNG conversion when format specifies PNG."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[],
+                labels=[],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="PNG (lossless)",
+                force_reprocess=True,
+            )
+
+            worker.run()
+
+            converted_dir = os.path.join(output_dir, "converted_png")
+            assert os.path.isdir(converted_dir)
+            converted_files = os.listdir(converted_dir)
+            assert all(f.endswith(".png") for f in converted_files)
+
+    def test_worker_cancellation_during_conversion(
+        self, qapp, mock_mask_generator, tmp_image_dir
+    ):
+        """Worker should stop when stop flag is set during conversion."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[],
+                labels=[],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+            )
+
+            # Set stop before running
+            worker.stop()
+            worker.run()
+
+            # Model should NOT have been initialized
+            mock_mask_generator.initialize.assert_not_called()
+
+    def test_worker_emits_finished_on_exception(self, qapp):
+        """Worker should emit finished even when an exception occurs."""
+        from controllers.processing_controller import ProcessingWorker
+
+        failing_mg = MagicMock()
+        failing_mg.initialize = MagicMock(
+            side_effect=RuntimeError("GPU out of memory")
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a dummy image so we pass the empty-files check
+            img = np.zeros((10, 10, 3), dtype=np.uint8)
+            cv2.imwrite(os.path.join(tmpdir, "img.png"), img)
+
+            image_files = [os.path.join(tmpdir, "img.png")]
+
+            worker = ProcessingWorker(
+                mask_generator=failing_mg,
+                image_files=image_files,
+                output_dir=tmpdir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[],
+                labels=[],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=1,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+            )
+
+            errors = []
+            finished_signals = []
+            worker.error.connect(lambda msg: errors.append(msg))
+            worker.finished.connect(lambda: finished_signals.append(True))
+
+            worker.run()
+
+            assert len(errors) == 1
+            assert "GPU out of memory" in errors[0]
+            assert len(finished_signals) == 1
+
+
+# =============================================================================
+# CorrectionWorker Tests
+# =============================================================================
+
+class TestCorrectionWorker:
+    """Tests for the correction re-propagation worker."""
+
+    def test_correction_uninitialized_model(self, qapp):
+        """Should emit error if model not initialized."""
+        from controllers.processing_controller import CorrectionWorker
+
+        mg = MagicMock()
+        mg.is_initialized = False
+
+        worker = CorrectionWorker(
+            mask_generator=mg,
+            frame_idx=5,
+            points=[[10.0, 20.0]],
+            labels=[1],
+            threshold=0.0,
+            image_files=[],
+            output_dir="/tmp/out",
+        )
+
+        errors = []
+        finished_signals = []
+        worker.error.connect(lambda msg: errors.append(msg))
+        worker.finished.connect(lambda: finished_signals.append(True))
+
+        worker.run()
+
+        assert len(errors) == 1
+        assert "not initialized" in errors[0].lower()
+        assert len(finished_signals) == 1
+
+    def test_correction_success(self, qapp, mock_mask_generator, tmp_image_dir):
+        """Correction worker should re-propagate and save masks."""
+        from controllers.processing_controller import CorrectionWorker
+
+        mock_mask_generator.is_initialized = True
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = CorrectionWorker(
+                mask_generator=mock_mask_generator,
+                frame_idx=1,
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                image_files=image_files,
+                output_dir=output_dir,
+            )
+
+            frame_signals = []
+            finished_signals = []
+            worker.frame_processed.connect(
+                lambda idx, m, o: frame_signals.append(idx)
+            )
+            worker.finished.connect(lambda: finished_signals.append(True))
+
+            worker.run()
+
+            mock_mask_generator.add_correction.assert_called_once()
+            mock_mask_generator.propagate_from.assert_called_once()
+
+            # Only frames >= 1 should be emitted (propagate_from filters)
+            assert all(idx >= 1 for idx in frame_signals)
+            assert len(finished_signals) == 1
+
+    def test_correction_copies_data(self, qapp, mock_mask_generator):
+        """Correction worker should copy points/labels at construction."""
+        from controllers.processing_controller import CorrectionWorker
+
+        points = [[1.0, 2.0]]
+        labels = [1]
+        files = ["/a.png"]
+
+        worker = CorrectionWorker(
+            mask_generator=mock_mask_generator,
+            frame_idx=0,
+            points=points,
+            labels=labels,
+            threshold=0.0,
+            image_files=files,
+            output_dir="/tmp/out",
+        )
+
+        points.append([99.0, 99.0])
+        labels.append(0)
+        files.append("/z.png")
+
+        assert len(worker._points) == 1
+        assert len(worker._labels) == 1
+        assert len(worker._image_files) == 1
+
+
+# =============================================================================
+# ProcessingController Tests
+# =============================================================================
+
+class TestProcessingController:
+    """Tests for the ProcessingController orchestrator."""
+
+    def test_initial_state(self, qapp, state, mock_mask_generator):
+        from controllers.processing_controller import ProcessingController
+        ctrl = ProcessingController(state, mock_mask_generator)
+        assert ctrl.is_running is False
+
+    def test_start_correction_uninitialized(self, qapp, state, mock_mask_generator):
+        """Should emit error signal if model not initialized."""
+        from controllers.processing_controller import ProcessingController
+
+        mock_mask_generator.is_initialized = False
+        ctrl = ProcessingController(state, mock_mask_generator)
+
+        errors = []
+        ctrl.processing_error.connect(lambda msg: errors.append(msg))
+
+        ctrl.start_correction(0, [[10.0, 20.0]], [1])
+        assert len(errors) == 1
+        assert "not initialized" in errors[0].lower()
+
+    def test_stop_when_no_worker(self, qapp, state, mock_mask_generator):
+        """Stop should be safe when no worker is running."""
+        from controllers.processing_controller import ProcessingController
+        ctrl = ProcessingController(state, mock_mask_generator)
+        ctrl.stop_processing()  # Should not raise
+
+    def test_controller_signals_connected(self, qapp, state, mock_mask_generator):
+        """Controller should forward worker signals."""
+        from controllers.processing_controller import ProcessingController
+
+        ctrl = ProcessingController(state, mock_mask_generator)
+
+        # Verify signal types exist
+        assert hasattr(ctrl, "progress")
+        assert hasattr(ctrl, "frame_processed")
+        assert hasattr(ctrl, "processing_finished")
+        assert hasattr(ctrl, "processing_error")
+
+    def test_on_finished_clears_worker(self, qapp, state, mock_mask_generator):
+        """_on_finished should clear the worker reference."""
+        from controllers.processing_controller import ProcessingController
+        ctrl = ProcessingController(state, mock_mask_generator)
+
+        # Simulate a worker existing
+        ctrl._worker = MagicMock()
+
+        finished_signals = []
+        ctrl.processing_finished.connect(lambda: finished_signals.append(True))
+
+        ctrl._on_finished()
+        assert ctrl._worker is None
+        assert len(finished_signals) == 1
+
+
+# =============================================================================
+# SpatialSmoothWorker Tests
+# =============================================================================
+
+class TestSpatialSmoothWorker:
+    """Tests for spatial smoothing background worker."""
+
+    def test_spatial_smooth_basic(self, qapp, tmp_mask_dir):
+        """Should smooth all masks and save to output dir."""
+        from controllers.smoothing_controller import SpatialSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = SpatialSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                num_iterations=5,
+                dt=0.1,
+                kappa=30.0,
+                option=1,
+            )
+
+            progress_signals = []
+            finished_dirs = []
+            worker.progress.connect(
+                lambda c, t: progress_signals.append((c, t))
+            )
+            worker.finished.connect(lambda d: finished_dirs.append(d))
+
+            worker.run()
+
+            # All 5 masks should be processed
+            assert len(progress_signals) == 5
+            assert progress_signals[-1] == (5, 5)
+
+            # finished should emit with the output directory
+            assert len(finished_dirs) == 1
+            assert finished_dirs[0] == output_dir
+
+            # Output files should exist
+            output_files = [
+                f for f in os.listdir(output_dir) if f.endswith(".tiff")
+            ]
+            assert len(output_files) == 5
+
+    def test_spatial_smooth_empty_dir(self, qapp):
+        """Should emit error for empty input directory."""
+        from controllers.smoothing_controller import SpatialSmoothWorker
+
+        with tempfile.TemporaryDirectory() as empty_dir:
+            with tempfile.TemporaryDirectory() as output_dir:
+                worker = SpatialSmoothWorker(
+                    input_dir=empty_dir,
+                    output_dir=output_dir,
+                )
+
+                errors = []
+                worker.error.connect(lambda msg: errors.append(msg))
+
+                worker.run()
+
+                assert len(errors) == 1
+                assert "No mask files" in errors[0]
+
+    def test_spatial_smooth_cancellation(self, qapp, tmp_mask_dir):
+        """Should stop when stop flag is set."""
+        from controllers.smoothing_controller import SpatialSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = SpatialSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                num_iterations=5,
+            )
+            worker.stop()
+            worker.run()
+
+            # Output should be empty or very few files
+            output_files = os.listdir(output_dir)
+            assert len(output_files) == 0
+
+    def test_spatial_smooth_option_2(self, qapp, tmp_mask_dir):
+        """Should work with diffusivity option 2."""
+        from controllers.smoothing_controller import SpatialSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = SpatialSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                num_iterations=3,
+                option=2,
+            )
+
+            finished_dirs = []
+            worker.finished.connect(lambda d: finished_dirs.append(d))
+
+            worker.run()
+
+            assert len(finished_dirs) == 1
+            output_files = [
+                f for f in os.listdir(output_dir) if f.endswith(".tiff")
+            ]
+            assert len(output_files) == 5
+
+    def test_spatial_smooth_with_post_gaussian(self, qapp, tmp_mask_dir):
+        """Should apply post-Gaussian smoothing."""
+        from controllers.smoothing_controller import SpatialSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = SpatialSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                num_iterations=3,
+                post_gaussian_sigma=1.0,
+            )
+
+            finished_dirs = []
+            worker.finished.connect(lambda d: finished_dirs.append(d))
+
+            worker.run()
+
+            assert len(finished_dirs) == 1
+
+
+# =============================================================================
+# TemporalSmoothWorker Tests
+# =============================================================================
+
+class TestTemporalSmoothWorker:
+    """Tests for temporal smoothing background worker."""
+
+    def test_temporal_smooth_basic(self, qapp, tmp_mask_dir):
+        """Should temporally smooth mask sequence and save output."""
+        from controllers.smoothing_controller import TemporalSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = TemporalSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                sigma=1.0,
+                num_neighbors=1,
+            )
+
+            progress_signals = []
+            finished_dirs = []
+            worker.progress.connect(
+                lambda c, t, s: progress_signals.append((c, t, s))
+            )
+            worker.finished.connect(lambda d: finished_dirs.append(d))
+
+            worker.run()
+
+            assert len(finished_dirs) == 1
+            assert finished_dirs[0] == output_dir
+
+            output_files = [
+                f for f in os.listdir(output_dir) if f.endswith(".tiff")
+            ]
+            assert len(output_files) == 5
+
+    def test_temporal_smooth_empty_dir(self, qapp):
+        """Should emit error for empty input directory."""
+        from controllers.smoothing_controller import TemporalSmoothWorker
+
+        with tempfile.TemporaryDirectory() as empty_dir:
+            with tempfile.TemporaryDirectory() as output_dir:
+                worker = TemporalSmoothWorker(
+                    input_dir=empty_dir,
+                    output_dir=output_dir,
+                )
+
+                errors = []
+                worker.error.connect(lambda msg: errors.append(msg))
+
+                worker.run()
+
+                assert len(errors) == 1
+                assert "No mask files" in errors[0]
+
+    def test_temporal_smooth_cancellation(self, qapp, tmp_mask_dir):
+        """Should stop when stop flag is set during loading."""
+        from controllers.smoothing_controller import TemporalSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = TemporalSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+            )
+            worker.stop()
+            worker.run()
+
+            output_files = os.listdir(output_dir)
+            assert len(output_files) == 0
+
+    def test_temporal_smooth_with_variance_threshold(self, qapp, tmp_mask_dir):
+        """Should work with explicit variance threshold."""
+        from controllers.smoothing_controller import TemporalSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = TemporalSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                sigma=1.0,
+                variance_threshold=50000.0,
+            )
+
+            finished_dirs = []
+            worker.finished.connect(lambda d: finished_dirs.append(d))
+
+            worker.run()
+
+            assert len(finished_dirs) == 1
+
+    def test_temporal_smooth_progress_callback(self, qapp, tmp_mask_dir):
+        """Should emit progress signals from the temporal pipeline."""
+        from controllers.smoothing_controller import TemporalSmoothWorker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = TemporalSmoothWorker(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                sigma=1.0,
+            )
+
+            progress_signals = []
+            worker.progress.connect(
+                lambda c, t, s: progress_signals.append(s)
+            )
+
+            worker.run()
+
+            # Should have progress from temporal_smooth_sequence callback
+            assert len(progress_signals) > 0
+
+
+# =============================================================================
+# SmoothingController Tests
+# =============================================================================
+
+class TestSmoothingController:
+    """Tests for the SmoothingController orchestrator."""
+
+    def test_initial_state(self, qapp):
+        from controllers.smoothing_controller import SmoothingController
+        ctrl = SmoothingController()
+        assert ctrl.is_running is False
+
+    def test_stop_when_no_worker(self, qapp):
+        """Stop should be safe when no worker is running."""
+        from controllers.smoothing_controller import SmoothingController
+        ctrl = SmoothingController()
+        ctrl.stop()  # Should not raise
+
+    def test_controller_spatial_signals(self, qapp):
+        """Controller should have expected signals."""
+        from controllers.smoothing_controller import SmoothingController
+        ctrl = SmoothingController()
+        assert hasattr(ctrl, "progress")
+        assert hasattr(ctrl, "smoothing_finished")
+        assert hasattr(ctrl, "smoothing_error")
+
+    def test_on_finished_clears_worker(self, qapp):
+        """_on_finished should clear the worker reference and emit signal."""
+        from controllers.smoothing_controller import SmoothingController
+        ctrl = SmoothingController()
+        ctrl._worker = MagicMock()
+
+        finished_signals = []
+        ctrl.smoothing_finished.connect(lambda d: finished_signals.append(d))
+
+        ctrl._on_finished("/some/output/dir")
+
+        assert ctrl._worker is None
+        assert len(finished_signals) == 1
+        assert finished_signals[0] == "/some/output/dir"
+
+    def test_spatial_start_creates_worker(self, qapp, tmp_mask_dir):
+        """start_spatial should create and start a SpatialSmoothWorker."""
+        from controllers.smoothing_controller import SmoothingController
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            ctrl = SmoothingController()
+
+            finished_signals = []
+            ctrl.smoothing_finished.connect(
+                lambda d: finished_signals.append(d)
+            )
+
+            ctrl.start_spatial(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                num_iterations=2,
+            )
+
+            # Worker should have been created
+            assert ctrl._worker is not None
+
+            # Wait for it to finish
+            ctrl._worker.wait(10000)
+
+            # Give event loop time to process
+            qapp.processEvents()
+
+    def test_temporal_start_creates_worker(self, qapp, tmp_mask_dir):
+        """start_temporal should create and start a TemporalSmoothWorker."""
+        from controllers.smoothing_controller import SmoothingController
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            ctrl = SmoothingController()
+
+            ctrl.start_temporal(
+                input_dir=tmp_mask_dir,
+                output_dir=output_dir,
+                sigma=1.0,
+            )
+
+            assert ctrl._worker is not None
+
+            ctrl._worker.wait(10000)
+            qapp.processEvents()
+
+
+# =============================================================================
+# Integration-level tests
+# =============================================================================
+
+class TestProcessingIntegration:
+    """Higher-level integration tests combining controller + state."""
+
+    def test_controller_reads_state_config(self, qapp, state, mock_mask_generator):
+        """ProcessingController should read model config from state."""
+        from controllers.processing_controller import ProcessingController
+
+        state.set_model_name("SAM2 Hiera Tiny")
+        state.set_device("cpu")
+        state.set_threshold(0.5)
+
+        ctrl = ProcessingController(state, mock_mask_generator)
+
+        cfg, ckpt = state.get_model_config()
+        assert cfg == "sam2.1_hiera_t.yaml"
+        assert "tiny" in ckpt
+
+    def test_worker_skip_conversion_if_exists(
+        self, qapp, mock_mask_generator, tmp_image_dir
+    ):
+        """Worker should skip conversion when file exists and not force."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            # Pre-create converted directory with files
+            converted_dir = os.path.join(output_dir, "converted_jpeg")
+            os.makedirs(converted_dir, exist_ok=True)
+            for i in range(len(image_files)):
+                dummy_path = os.path.join(converted_dir, f"frame_{i:06d}.jpg")
+                cv2.imwrite(
+                    dummy_path,
+                    np.zeros((10, 10, 3), dtype=np.uint8),
+                )
+
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[],
+                labels=[],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=False,  # Should skip existing
+            )
+
+            progress_msgs = []
+            worker.progress.connect(
+                lambda c, t, m: progress_msgs.append(m)
+            )
+
+            worker.run()
+
+            # No conversion progress should be emitted (all skipped)
+            conversion_msgs = [
+                m for m in progress_msgs if "Converting" in m
+            ]
+            assert len(conversion_msgs) == 0
