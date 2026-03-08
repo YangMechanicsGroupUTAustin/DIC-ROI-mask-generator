@@ -542,6 +542,10 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Capture current preprocessing config from sidebar
+        preprocessing_config = self._sidebar.get_preprocessing_config()
+        self._state.set_preprocessing_config(preprocessing_config)
+
         self._status_bar.reset_timer()
         self._state.set_state(self._state.State.PROCESSING)
         self._processing.start_processing()

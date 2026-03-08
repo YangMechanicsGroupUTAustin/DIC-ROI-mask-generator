@@ -15,6 +15,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from core.mask_generator import MaskGenerator
 from core.image_processing import convert_image, get_image_dimensions
+from core.preprocessing import PreprocessingConfig, apply_pipeline
 
 logger = logging.getLogger("sam2studio.processing_controller")
 
@@ -51,6 +52,7 @@ class ProcessingWorker(QThread):
         end_frame: int,               # 1-based
         intermediate_format: str,     # "JPEG (fast)" or "PNG (lossless)"
         force_reprocess: bool = False,
+        preprocessing_config: PreprocessingConfig | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -68,6 +70,7 @@ class ProcessingWorker(QThread):
         self._end_frame = end_frame
         self._intermediate_format = intermediate_format
         self._force_reprocess = force_reprocess
+        self._preprocessing_config = preprocessing_config or PreprocessingConfig()
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -132,6 +135,10 @@ class ProcessingWorker(QThread):
                 f"Downsampled {orig_w}x{orig_h} -> {conv_w}x{conv_h} "
                 f"(scale: {scale_x:.3f}x{scale_y:.3f})"
             )
+
+        # --- Stage 1.5: Apply preprocessing to converted images ---
+        if not self._preprocessing_config.is_identity():
+            self._apply_preprocessing(converted_dir, ext, total_files)
 
         # --- Stage 2: Initialize model ---
         if self._stop_event.is_set():
@@ -253,6 +260,34 @@ class ProcessingWorker(QThread):
                 )
 
         return None
+
+    def _apply_preprocessing(
+        self, converted_dir: str, ext: str, total_files: int,
+    ) -> None:
+        """Apply preprocessing to converted images in-place."""
+        self.progress.emit(0, total_files, "Applying preprocessing...")
+
+        for i in range(total_files):
+            if self._stop_event.is_set():
+                return
+
+            img_path = os.path.join(converted_dir, f"{i:06d}{ext}")
+            if not os.path.exists(img_path):
+                continue
+
+            img = cv2.imread(img_path)
+            if img is None:
+                continue
+
+            processed = apply_pipeline(img, self._preprocessing_config)
+            cv2.imwrite(img_path, processed)
+
+            self.progress.emit(
+                i + 1, total_files,
+                f"Preprocessing ({i + 1}/{total_files})",
+            )
+
+        logger.info("Preprocessing applied to converted images")
 
 
 class CorrectionWorker(QThread):
@@ -434,6 +469,7 @@ class ProcessingController(QObject):
             end_frame=self._state.end_frame,
             intermediate_format=self._state.intermediate_format,
             force_reprocess=self._state.force_reprocess,
+            preprocessing_config=self._state.preprocessing_config,
         )
         self._connect_worker(worker)
         self._worker = worker
