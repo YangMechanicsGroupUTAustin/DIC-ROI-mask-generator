@@ -14,7 +14,7 @@ DESCRIPTION = "SAM 2 Mask Generator for Digital Image Correlation (DIC) and ROI 
 URL = "https://www.researchsquare.com/article/rs-5566473/v1"  # Your research paper
 AUTHOR = "Zixiang Tong"  # Replace with your actual name
 AUTHOR_EMAIL = "zachtong@utexas.edu"  # Replace with your email
-LICENSE = "Apache 2.0"
+LICENSE = "MIT"
 
 # Read the contents of README file
 with open("README.md", "r", encoding="utf-8") as f:

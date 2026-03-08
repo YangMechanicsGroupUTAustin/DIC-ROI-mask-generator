@@ -277,16 +277,8 @@ function smoothedImage = smoothSingleImage(originalImage, params)
         % Calculate Laplacian of diffusivity
         laplacianDiffusivity = imfilter(diffusivity, laplacianKernel, 'symmetric');
         
-        % Calculate viscous and surface tension terms
-        viscousTerm = params.viscousness * del2(smoothedImage);
-        [Gxx, Gyy] = gradient(Gx);
-        [~, Gyx] = gradient(Gy);
-        curvature = Gxx + Gyy;
-        surfaceTensionTerm = params.surfaceTension * curvature;
-        
         % Update smoothed image
-        smoothedImage = smoothedImage + params.dt * (laplacianDiffusivity .* del2(smoothedImage)) ...
-            - params.dt * surfaceTensionTerm - params.dt * viscousTerm;
+        smoothedImage = smoothedImage + params.dt * (laplacianDiffusivity .* del2(smoothedImage));
             
         % Apply Gaussian filter
         smoothedImage = imgaussfilt(smoothedImage, params.gaussianSigma, 'FilterSize', params.gaussianSize);
@@ -597,7 +589,9 @@ function [imageSequence, badFrameIndices] = removeBadFrames(frames, varianceThre
     
     badFrameIndices1 = find(variances > varianceThreshold);
     badFrameIndices2 = find(variances == 0);
-    badFrameIndices = unique([badFrameIndices1, badFrameIndices2, badFrameIndices2-1, badFrameIndices2+1]);
+    neighborIndices = [badFrameIndices2-1, badFrameIndices2+1];
+    neighborIndices = neighborIndices(neighborIndices >= 1 & neighborIndices <= numFrames);
+    badFrameIndices = unique([badFrameIndices1, badFrameIndices2, neighborIndices]);
     imageSequence(:,:,badFrameIndices) = nan;
 end
 

@@ -68,8 +68,7 @@ class SAM2App:
         self.current_model_config = None
         
         self.setup_gui()
-        self.prev_masks = []
-        self.current_masks = [None, None, None]
+        self.current_masks = None
         self.processTimes = 0
         self.start_index = 1
         self.end_index = []
@@ -349,7 +348,7 @@ class SAM2App:
                 text_size = max(12, int(14 * self.dpi_scale))
             else:  # Standard displays
                 text_size = max(10, int(12 * self.dpi_scale))
-            if all(item is None for item in self.current_masks):
+            if self.current_masks is None:
                 self.ax2.clear()
                 self.ax2.set_title('Generated Mask', fontsize=title_size, fontweight='bold', pad=10)
                 self.ax2.text(0.5, 0.5, 'Mask will be\ndisplayed here', 
@@ -364,20 +363,21 @@ class SAM2App:
 
             # Panel 3: Overlay View (Original + Mask)
             self.ax3.clear()
-            if not all(item is None for item in self.current_masks):
+            if self.current_masks is not None:
                 # Create overlay: original image with semi-transparent mask
                 overlay_image = self.current_image.copy()
                 if len(overlay_image.shape) == 2:
                     overlay_image = np.stack([overlay_image] * 3, axis=-1)
                 
-                # Create colored mask overlay (red for mask)
-                mask_colored = np.zeros_like(overlay_image)
-                mask_colored[:, :, 0] = self.current_masks[0] / 255.0  # Red channel
-                
-                # Blend images
-                alpha = 0.4  # Transparency
-                blended = overlay_image * (1 - alpha) + mask_colored * alpha * 255
-                blended = np.clip(blended, 0, 255).astype(np.uint8)
+                # Create colored mask overlay (red tint on masked region)
+                mask_bool = self.current_masks[0] > 127
+                alpha = 0.4
+                blended = overlay_image.copy()
+                blended[mask_bool, 0] = np.clip(
+                    overlay_image[mask_bool, 0] * (1 - alpha) + 255 * alpha, 0, 255
+                ).astype(np.uint8)
+                blended[mask_bool, 1] = (overlay_image[mask_bool, 1] * (1 - alpha)).astype(np.uint8)
+                blended[mask_bool, 2] = (overlay_image[mask_bool, 2] * (1 - alpha)).astype(np.uint8)
                 
                 self.ax3.imshow(blended)
                 self.ax3.set_title('Overlay View', fontsize=title_size, fontweight='bold', pad=10)
@@ -722,12 +722,20 @@ class SAM2App:
                 print(f"Failed to process image {img_path}: {str(e)}")
                 # If processing fails, create a black image as placeholder
                 try:
-                    blank_img = np.zeros((100, 100, 3), dtype=np.uint8)  # Create a small black image
+                    ref_shape = None
+                    for existing_jpeg in jpeg_files:
+                        ref_img = cv2.imread(existing_jpeg)
+                        if ref_img is not None:
+                            ref_shape = ref_img.shape
+                            break
+                    if ref_shape is None:
+                        ref_shape = (512, 512, 3)
+                    blank_img = np.zeros(ref_shape, dtype=np.uint8)
                     cv2.imwrite(jpeg_path, blank_img)
                     jpeg_files.append(jpeg_path)
-                    print(f"Created blank placeholder for {img_path}")
-                except:
-                    print(f"Failed to create placeholder for {img_path}")
+                    print(f"Created placeholder ({ref_shape[1]}x{ref_shape[0]}) for {img_path}")
+                except Exception as e:
+                    print(f"Failed to create placeholder for {img_path}: {e}")
                 continue
 
         sam2_checkpoint = os.path.join(current_dir, self.config.checkpoint)
@@ -821,11 +829,8 @@ class SAM2App:
                 print("Processing stopped by user.")
                 break
 
-            # Update current image display
+            # Update display with both image and mask in a single render
             self.current_image = image
-            self.display_image(keep_points=True)
-
-            # Update current mask display
             self.current_masks = binary_masks
             self.display_image()
 
@@ -865,55 +870,6 @@ class SAM2App:
                 if file.lower().endswith(image_extensions):
                     image_files.append(os.path.join(root, file))
         return sorted(image_files, key=lambda x: extract_numbers(os.path.basename(x)))
-
-    def get_effective_points(self, image_shape):
-        orig_points = np.array(self.config.input_points)
-        orig_labels = np.array(self.config.input_labels)
-
-        if len(orig_points) == 0 or len(self.prev_masks) == 0:
-            return orig_points, orig_labels
-
-
-        masks_to_check = self.prev_masks[-3:]
-
-        effective_points = []
-        effective_labels = []
-
-        for p, lbl in zip(orig_points, orig_labels):
-            x, y = p[0], p[1]
-
-            if x < 0 or y < 0 or y >= image_shape[0] or x >= image_shape[1]:
-                continue
-
-
-            mask_values = [masks[y, x] for masks in masks_to_check]
-
-
-            mask_values_bin = [1 if val > 127 else 0 for val in mask_values]
-
-            num_fg = sum(mask_values_bin)
-            num_bg = len(mask_values_bin) - num_fg
-
-
-            user_bin = 1 if lbl == 1 else 0
-
-
-            if num_fg == 3 and user_bin == 0:
-                effective_points.append([x, y])
-                effective_labels.append(1)
-            elif num_bg == 3 and user_bin == 1:
-                effective_points.append([x, y])
-                effective_labels.append(0)
-            else:
-
-                if num_fg == 3 and user_bin == 1:
-                    effective_points.append([x, y])
-                    effective_labels.append(1)
-                elif num_bg == 3 and user_bin == 0:
-                    effective_points.append([x, y])
-                    effective_labels.append(0)
-
-        return np.array(effective_points), np.array(effective_labels)
 
     def cleanup_temp_folders(self):
         if not self.config.input_dir:
@@ -970,7 +926,7 @@ def get_dpi_scale_factor(root):
             scale_factor = min(scale_factor, 1.5)
         
         return scale_factor
-    except:
+    except Exception:
         return 1.25  # Better default for modern displays
 
 def configure_dpi_aware_fonts(root, style):
@@ -1028,7 +984,7 @@ if __name__ == "__main__":
         import ctypes
         # Tell Windows that this app is DPI aware
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except:
+    except Exception:
         pass  # Ignore if not on Windows or if the call fails
     
     # Configure modern UI styling with DPI awareness
@@ -1055,7 +1011,7 @@ if __name__ == "__main__":
     try:
         # Try to set a professional icon (if available)
         root.iconbitmap(default='')  # You can add an .ico file path here
-    except:
+    except Exception:
         pass  # Ignore if no icon file available
     
     app = SAM2App(root)
