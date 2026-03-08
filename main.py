@@ -62,6 +62,11 @@ class SAM2App:
         self.current_predictor = None
         self.current_model_config = None
         
+        # Correction mode state
+        self.correction_mode = False
+        self.correction_points = []
+        self.correction_labels = []
+
         self.setup_gui()
         self.current_masks = None
         self.processTimes = 0
@@ -228,6 +233,18 @@ class SAM2App:
         self.stop_btn = ttk.Button(control_frame, text="Stop Processing", command=self.stop_processing,
                                    state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.correction_btn = ttk.Button(
+            control_frame, text="Add Correction",
+            command=self.start_correction_mode, state=tk.DISABLED
+        )
+        self.correction_btn.pack(side=tk.LEFT, padx=(5, 0))
+
+        self.apply_correction_btn = ttk.Button(
+            control_frame, text="Apply Correction",
+            command=self.apply_correction, state=tk.DISABLED
+        )
+        self.apply_correction_btn.pack(side=tk.LEFT, padx=(5, 0))
 
         # Mask threshold control
         threshold_frame = ttk.Frame(parent)
@@ -652,6 +669,8 @@ class SAM2App:
         self.processing = False
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
+        if self.inference_state is not None:
+            self.correction_btn.config(state=tk.NORMAL)
 
     def _process_images_internal(self):
         """Internal processing method with detailed error handling.
@@ -873,6 +892,133 @@ class SAM2App:
 
         final_message = "Processing complete." if frame_count > 0 else "Processing stopped."
         self.master.after(0, lambda t=final_message: self.progress_label.config(text=t))
+
+    def start_correction_mode(self):
+        """Enter correction mode: user navigates to a frame, draws points, then applies."""
+        if self.inference_state is None or self.current_predictor is None:
+            messagebox.showerror("Error", "Run initial processing first before adding corrections.")
+            return
+
+        self.correction_mode = True
+        self.correction_points = []
+        self.correction_labels = []
+
+        # Enable drawing mode
+        self.plotting_mode = True
+        self.plot_points_btn.config(text="Stop Drawing")
+        self.canvas.mpl_connect('button_press_event', self.on_click)
+
+        # Enable Apply button
+        self.apply_correction_btn.config(state=tk.NORMAL)
+
+        messagebox.showinfo(
+            "Correction Mode",
+            "Navigate to the frame you want to correct using the slider.\n"
+            "Draw correction points (foreground/background), then click 'Apply Correction'.\n"
+            "Points drawn in this mode will only apply to the current preview frame."
+        )
+
+    def apply_correction(self):
+        """Apply correction points to current preview frame and re-propagate."""
+        if not self.config.input_points:
+            messagebox.showwarning("Warning", "No points drawn for correction.")
+            return
+
+        preview_frame = self.preview_index_var.get()
+        # Calculate the frame index relative to the processing range
+        correction_frame_idx = preview_frame - self.start_index
+        if correction_frame_idx < 0:
+            messagebox.showerror("Error", "Current preview frame is before the processing start frame.")
+            return
+
+        predictor = self.current_predictor
+        if predictor is None or self.inference_state is None:
+            messagebox.showerror("Error", "No active inference state. Run processing first.")
+            return
+
+        # Use the current annotation points as correction
+        points_array = np.array(self.config.input_points)
+        labels_array = np.array(self.config.input_labels)
+
+        try:
+            predictor.add_new_points_or_box(
+                inference_state=self.inference_state,
+                frame_idx=correction_frame_idx,
+                obj_id=1,
+                points=points_array,
+                labels=labels_array,
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add correction points: {e}")
+            return
+
+        # Exit correction mode
+        self.correction_mode = False
+        self.apply_correction_btn.config(state=tk.DISABLED)
+
+        # Re-propagate in background thread
+        self.processing = True
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.correction_btn.config(state=tk.DISABLED)
+
+        thread = threading.Thread(target=self._repropagate_thread, daemon=True)
+        thread.start()
+
+    def _repropagate_thread(self):
+        """Re-propagate masks after correction in background."""
+        try:
+            predictor = self.current_predictor
+            image_files = get_image_files(self.config.input_dir)
+            processing_images = image_files[self.start_index - 1:self.end_index]
+            total = len(processing_images)
+            threshold = self.threshold_var.get()
+
+            frame_count = 0
+            for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(self.inference_state):
+                if not self.processing:
+                    break
+
+                adjusted = out_frame_idx + self.start_index - 1
+                if adjusted < 0 or adjusted >= len(image_files):
+                    continue
+
+                video_segments = {
+                    out_obj_id: (out_mask_logits[i] > threshold).cpu().numpy()
+                    for i, out_obj_id in enumerate(out_obj_ids)
+                }
+                binary_masks = video_segments[1].astype(np.uint8) * 255
+
+                # Save updated mask
+                image_name = os.path.basename(image_files[adjusted])
+                mask1_dir = os.path.join(self.config.output_dir, "mask1")
+                os.makedirs(mask1_dir, exist_ok=True)
+                try:
+                    cv2.imwrite(os.path.join(mask1_dir, image_name), binary_masks[0])
+                except Exception as e:
+                    print(f"Error saving corrected mask for {image_name}: {e}")
+
+                # Update display
+                image = load_image_as_rgb(image_files[adjusted])
+                if image is not None:
+                    self.current_image = image
+                    self.current_masks = binary_masks
+
+                frame_count += 1
+                progress = (out_frame_idx + 1) / total * 100
+                self.master.after(0, lambda p=progress: self.update_progress(p))
+                self.master.after(0, lambda fi=out_frame_idx, t=total: self.progress_label.config(
+                    text=f"Re-propagating: {fi+1}/{t}"
+                ))
+                self.master.after(0, self.display_image)
+
+            final_msg = f"Correction applied. {frame_count} frames updated."
+            self.master.after(0, lambda t=final_msg: self.progress_label.config(text=t))
+
+        except Exception as e:
+            self.master.after(0, lambda: messagebox.showerror("Error", f"Re-propagation failed: {e}"))
+        finally:
+            self.master.after(0, self._on_processing_complete)
 
     def cleanup_temp_folders(self):
         if not self.config.input_dir:
