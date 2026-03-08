@@ -19,10 +19,12 @@ import os
 from typing import Optional
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -107,10 +109,36 @@ class MainWindow(QMainWindow):
         # Wire signals if controllers are provided
         if self._state is not None:
             self._connect_signals()
+            self._register_shortcuts()
             self._update_ui_for_state(self._state.state.value)
 
         # Start maximized
         self.showMaximized()
+
+    # --- Window event overrides ---
+
+    def closeEvent(self, event) -> None:
+        """Warn user if processing is still running before closing."""
+        if self._processing is not None and self._processing.is_running:
+            reply = QMessageBox.question(
+                self,
+                "Processing Running",
+                "Processing is still running. Stop and exit?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._processing.stop_processing()
+                if (
+                    self._smoothing is not None
+                    and self._smoothing.is_running
+                ):
+                    self._smoothing.stop()
+                event.accept()
+            else:
+                event.ignore()
+                return
+        event.accept()
 
     # --- Properties for external access ---
 
@@ -250,6 +278,122 @@ class MainWindow(QMainWindow):
             smoothing.progress.connect(self._on_smoothing_progress)
             smoothing.smoothing_finished.connect(self._on_smoothing_finished)
             smoothing.smoothing_error.connect(self._on_smoothing_error)
+
+    # --- Keyboard Shortcuts ---
+
+    def _register_shortcuts(self) -> None:
+        """Register keyboard shortcuts for tools, navigation, and actions."""
+        # Tool shortcuts
+        QShortcut(QKeySequence("V"), self).activated.connect(
+            lambda: self._activate_tool("select")
+        )
+        QShortcut(QKeySequence("D"), self).activated.connect(
+            lambda: self._activate_tool("draw")
+        )
+        QShortcut(QKeySequence("E"), self).activated.connect(
+            lambda: self._activate_tool("erase")
+        )
+
+        # Toggle foreground/background mode
+        QShortcut(QKeySequence("Space"), self).activated.connect(
+            self._toggle_point_mode
+        )
+
+        # Undo / Redo
+        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(
+            self._shortcut_undo
+        )
+        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(
+            self._shortcut_redo
+        )
+        QShortcut(QKeySequence("Ctrl+Shift+Z"), self).activated.connect(
+            self._shortcut_redo
+        )
+
+        # Save / Load config
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(
+            self._on_save_config
+        )
+        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(
+            self._on_load_config
+        )
+
+        # Frame navigation
+        QShortcut(QKeySequence("Left"), self).activated.connect(
+            self._frame_navigator._prev_frame
+        )
+        QShortcut(QKeySequence("Right"), self).activated.connect(
+            self._frame_navigator._next_frame
+        )
+        QShortcut(QKeySequence("Home"), self).activated.connect(
+            self._go_to_first_frame
+        )
+        QShortcut(QKeySequence("End"), self).activated.connect(
+            self._go_to_last_frame
+        )
+
+        # Processing
+        QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(
+            self._on_start_processing
+        )
+        QShortcut(QKeySequence("Escape"), self).activated.connect(
+            self._shortcut_escape
+        )
+
+    def _activate_tool(self, tool: str) -> None:
+        """Activate a tool via shortcut: update toolbar and canvas."""
+        self._toolbar.set_tool(tool)
+        self._canvas_area.set_active_tool(tool)
+
+    def _toggle_point_mode(self) -> None:
+        """Toggle between foreground and background point mode."""
+        if self._annotation is not None:
+            new_mode = (
+                "background"
+                if self._annotation.point_mode == "foreground"
+                else "foreground"
+            )
+            self._annotation.set_point_mode(new_mode)
+            self._toolbar.set_mode(new_mode)
+
+    def _shortcut_undo(self) -> None:
+        """Undo the last annotation action."""
+        if self._annotation is not None:
+            self._annotation.undo()
+
+    def _shortcut_redo(self) -> None:
+        """Redo the last undone annotation action."""
+        if self._annotation is not None:
+            self._annotation.redo()
+
+    def _go_to_first_frame(self) -> None:
+        """Navigate to the first frame."""
+        nav = self._frame_navigator
+        if nav._total_frames >= 1:
+            nav.set_current_frame(1)
+            nav.frame_changed.emit(1)
+
+    def _go_to_last_frame(self) -> None:
+        """Navigate to the last frame."""
+        nav = self._frame_navigator
+        if nav._total_frames >= 1:
+            nav.set_current_frame(nav._total_frames)
+            nav.frame_changed.emit(nav._total_frames)
+
+    def _shortcut_escape(self) -> None:
+        """Handle Escape: stop processing or cancel correction."""
+        from controllers.app_state import AppState
+
+        if self._state is None:
+            return
+
+        current = self._state.state
+        if current == AppState.State.PROCESSING:
+            self._on_stop_processing()
+        elif current == AppState.State.POST_PROCESSING:
+            self._on_stop_processing()
+        elif current == AppState.State.CORRECTION:
+            self._state.set_state(AppState.State.REVIEWING)
 
     # --- State-dependent UI enablement ---
 
