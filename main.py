@@ -16,6 +16,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import build_sam2_video_predictor
 import shutil
 import time
+import threading
 from utils.dpi_scaling import DPIScaler
 from core.image_processing import get_image_files, load_image_as_rgb, extract_numbers, create_overlay
 
@@ -374,7 +375,6 @@ class SAM2App:
     def update_progress(self, progress):
         self.progress_var.set(progress)
         self.progress_label.config(text=f"{progress:.1f}%")
-        self.master.update()
 
     def start_processing(self):
         if not self.config.input_dir or not self.config.output_dir:
@@ -395,9 +395,6 @@ class SAM2App:
         self.config.checkpoint, self.config.model_cfg = models[self.model_var.get()]
 
         # Start processing
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.processing = True
         self.process_images()
 
     def stop_processing(self):
@@ -426,7 +423,9 @@ class SAM2App:
             self.current_model_config = current_config
             return self.current_predictor
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to create SAM2 predictor: {str(e)}")
+            self.master.after(0, lambda: messagebox.showerror(
+                "Error", f"Failed to create SAM2 predictor: {str(e)}"
+            ))
             return None
 
     def _cleanup_predictor(self):
@@ -450,67 +449,77 @@ class SAM2App:
                 print(f"Warning: Error during predictor cleanup: {e}")
 
     def process_images(self):
-        """Process images with comprehensive error handling"""
+        """Launch image processing in background thread."""
         try:
-            # Ensure output directory exists
             os.makedirs(self.config.output_dir, exist_ok=True)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to create output directory: {str(e)}")
-            self.processing = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
             return
-        
+
+        self.processing = True
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+
+        thread = threading.Thread(target=self._process_thread, daemon=True)
+        thread.start()
+
+    def _process_thread(self):
+        """Background thread for image processing."""
         try:
             self._process_images_internal()
         except Exception as e:
-            # Comprehensive error handling for unexpected failures
-            error_msg = f"Unexpected error during processing: {str(e)}"
-            print(error_msg)
-            messagebox.showerror("Processing Error", error_msg)
+            self.master.after(0, lambda: messagebox.showerror(
+                "Processing Error", f"Unexpected error: {str(e)}"
+            ))
         finally:
-            # Ensure UI state is reset regardless of success or failure
-            self.processing = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
+            self.master.after(0, self._on_processing_complete)
+
+    def _on_processing_complete(self):
+        """Called on main thread when processing finishes."""
+        self.processing = False
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
 
     def _process_images_internal(self):
-        """Internal processing method with detailed error handling"""
+        """Internal processing method with detailed error handling.
+
+        Runs in a background thread. All UI updates go through master.after().
+        """
         # Get parent directory and folder name of input_dir
         parent_dir = os.path.dirname(self.config.input_dir)
         input_folder_name = os.path.basename(self.config.input_dir)
-        
+
         # Get image file list and sort
         image_files = get_image_files(self.config.input_dir)
         total_images = len(image_files)
-        
+
         if total_images == 0:
-            messagebox.showerror("Error", "No supported image files found in input directory.")
+            self.master.after(0, lambda: messagebox.showerror(
+                "Error", "No supported image files found in input directory."
+            ))
             return
-        
+
         # Get user input range with proper validation
         try:
             self.start_index = int(self.start_index_entry.get() or 1)
             self.end_index = int(self.end_index_entry.get() or total_images)
         except ValueError:
-            messagebox.showerror("Error", "Invalid frame range values. Please enter valid numbers.")
-            self.processing = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
+            self.master.after(0, lambda: messagebox.showerror(
+                "Error", "Invalid frame range values. Please enter valid numbers."
+            ))
             return
-        
+
         # Ensure indices are within valid range (fix boundary condition bug)
         self.start_index = max(1, self.start_index)
         self.end_index = min(total_images, self.end_index)  # Fixed: removed +1 to prevent index overflow
-        
+
         # Validate range consistency
         if self.start_index > self.end_index:
-            messagebox.showerror("Error", "Start index cannot be greater than end index.")
-            self.processing = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
+            self.master.after(0, lambda: messagebox.showerror(
+                "Error", "Start index cannot be greater than end index."
+            ))
             return
-                
+
         # Create temporary directory, use input folder name with suffix, if range hasn't changed twice, use the previous jpg_range folder
         if self.start_index != self.start_index_previous or self.end_index != self.end_index_previous:
             self.processTimes = self.processTimes + 1
@@ -522,56 +531,56 @@ class SAM2App:
 
         # Check JPEG files in temporary folder
         existing_jpegs = {os.path.basename(f): f for f in glob.glob(os.path.join(temp_dir, "*.jpg"))}
-        
+
         # Convert all images to JPEG format
         jpeg_files = []
         processing_images = image_files[self.start_index-1:self.end_index]
         num_processing_images = len(processing_images)
-        
+
         # Initialize progress bar for mask prediction only
-        self.update_progress(0)
-        self.progress_label.config(text="Preparing images for mask prediction...")
-        
+        self.master.after(0, lambda p=0: self.update_progress(p))
+        self.master.after(0, lambda: self.progress_label.config(text="Preparing images for mask prediction..."))
+
         for idx, img_path in enumerate(processing_images):
             # Use simple numeric sequence naming for temporary files
             jpeg_name = f"{idx+self.start_index:06d}.jpg"  # Generate filename like "000001.jpg"
             jpeg_path = os.path.join(temp_dir, jpeg_name)
-        
+
             # Check if corresponding JPEG file already exists
             if jpeg_name in existing_jpegs:
                 jpeg_files.append(jpeg_path)
                 continue
-            
+
             try:
                 # First try to read with OpenCV
                 img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-                
+
                 # If OpenCV reading fails, try with PIL/Pillow
                 if img is None:
-                    
+
                     print(f"OpenCV failed to read image: {img_path}. Trying with PIL...")
-                    
+
                     # Use PIL to read image
                     pil_image = Image.open(img_path)
-                    
+
                     # Extract bit depth information for logging
                     bit_depth = getattr(pil_image, 'bit_depth', 'unknown')
                     print(f"Image format: {pil_image.format}, Mode: {pil_image.mode}, Bit depth: {bit_depth}")
-                    
+
                     # Special handling for 32-bit floating point TIFF and other high bit depth images
                     if pil_image.mode in ['F', 'I', 'I;16', 'I;32']:
                         # Convert to numpy array
                         img_array = np.array(pil_image)
-                        
+
                         # Normalize to 0-255 range
                         min_val = np.min(img_array)
                         max_val = np.max(img_array)
-                        
+
                         if max_val > min_val:  # Avoid division by zero
                             img = ((img_array - min_val) / (max_val - min_val) * 255).astype(np.uint8)
                         else:
                             img = np.zeros_like(img_array, dtype=np.uint8)
-                        
+
                         # If single channel image, convert to RGB
                         if len(img.shape) == 2:
                             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -592,15 +601,15 @@ class SAM2App:
                             img = ((img - min_val) / (max_val - min_val) * 255).astype(np.uint8)
                         else:
                             img = np.zeros_like(img, dtype=np.uint8)
-                    
+
                     # Ensure image is colored
                     if len(img.shape) == 2 or (len(img.shape) == 3 and img.shape[2] == 1):
                         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                
+
                 # Save as JPEG
                 cv2.imwrite(jpeg_path, img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 jpeg_files.append(jpeg_path)
-                
+
             except Exception as e:
                 print(f"Failed to process image {img_path}: {str(e)}")
                 # If processing fails, create a black image as placeholder
@@ -623,33 +632,29 @@ class SAM2App:
 
         sam2_checkpoint = os.path.join(current_dir, self.config.checkpoint)
         model_cfg = os.path.join(current_dir, self.config.model_cfg)
-        
+
         # Initialize SAM2 model using managed predictor (prevents memory leaks)
         predictor = self._get_or_create_predictor(sam2_checkpoint, model_cfg)
         if predictor is None:
-            self.processing = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
             return
-        
+
         # Reset previous state if exists
         if self.inference_state is not None:
             predictor.reset_state(self.inference_state)
-        
+
         # Initialize new state
         try:
             self.inference_state = predictor.init_state(video_path=temp_dir)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to initialize inference state: {str(e)}")
-            self.processing = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
+            self.master.after(0, lambda: messagebox.showerror(
+                "Error", f"Failed to initialize inference state: {str(e)}"
+            ))
             return
 
         # Convert input points and labels to numpy arrays
         points_array = np.array(self.config.input_points)
         labels_array = np.array(self.config.input_labels)
-        
+
         # Call predictor to add new points or box
         _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
             inference_state=self.inference_state,
@@ -661,20 +666,20 @@ class SAM2App:
 
         # Overall start time for basic timing
         total_start_time = time.time()
-        
+
         # run propagation throughout the video and collect the results in a dict
         video_segments = {}  # video_segments contains the per-frame segmentation results
-        
+
         # Create inference time recording generator wrapper
         def timed_propagate_in_video():
             for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(self.inference_state):
                 yield out_frame_idx, out_obj_ids, out_mask_logits
-        
+
         # Start processing each frame
         frame_count = 0
-        self.progress_label.config(text="Starting mask prediction...")
+        self.master.after(0, lambda: self.progress_label.config(text="Starting mask prediction..."))
         for out_frame_idx, out_obj_ids, out_mask_logits in timed_propagate_in_video():
-            
+
             # Read image with proper exception handling and index validation
             try:
                 # Validate frame index to prevent array out of bounds
@@ -682,16 +687,16 @@ class SAM2App:
                 if adjusted_frame_idx < 0 or adjusted_frame_idx >= len(image_files):
                     print(f"Warning: Frame index {adjusted_frame_idx} out of bounds. Skipping.")
                     continue
-                
+
                 image_path = image_files[adjusted_frame_idx]
                 image = cv2.imread(image_path)
                 if image is None:
                     print(f"Failed to read image: {image_path}. Skipping.")
                     continue
-                
+
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 image_name = os.path.basename(image_path)
-                
+
             except Exception as e:
                 print(f"Error processing frame {out_frame_idx}: {str(e)}. Skipping.")
                 continue
@@ -705,7 +710,7 @@ class SAM2App:
             out_masks = video_segments[out_frame_idx]
             binary_masks = out_masks[1]
             binary_masks = binary_masks.astype(np.uint8) * 255
-            
+
             frame_count += 1
 
             if not self.processing:
@@ -715,7 +720,7 @@ class SAM2App:
             # Update display with both image and mask in a single render
             self.current_image = image
             self.current_masks = binary_masks
-            self.display_image()
+            self.master.after(0, self.display_image)
 
             # Save the binary mask with error handling
             try:
@@ -731,19 +736,13 @@ class SAM2App:
 
             # Update progress - show mask prediction progress only
             mask_progress = (out_frame_idx + 1) / len(processing_images) * 100
-            self.update_progress(mask_progress)
-            self.progress_label.config(
-                text=f"Mask Prediction: {out_frame_idx+1}/{len(processing_images)}"
+            self.master.after(0, lambda p=mask_progress: self.update_progress(p))
+            self.master.after(0, lambda fi=out_frame_idx, n=len(processing_images):
+                self.progress_label.config(text=f"Mask Prediction: {fi+1}/{n}")
             )
-            self.master.update()
 
-        self.processing = False
         final_message = "Processing complete." if frame_count > 0 else "Processing stopped."
-        self.progress_label.config(text=final_message)
-
-        # Re-enable start button and disable stop button when processing is done
-        self.start_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
+        self.master.after(0, lambda t=final_message: self.progress_label.config(text=t))
 
     def cleanup_temp_folders(self):
         if not self.config.input_dir:
@@ -772,10 +771,6 @@ class SAM2App:
             # If jpg folder doesn't exist, create it
             os.makedirs(jpg_dir)
             print(f"Created temporary folder: {jpg_dir}")
-
-    def __del__(self):
-        """Cleanup when application is destroyed"""
-        self._cleanup_predictor()
 
 if __name__ == "__main__":
     root = tk.Tk()
@@ -812,6 +807,7 @@ if __name__ == "__main__":
     
     # Add cleanup on window close
     def on_closing():
+        app.cleanup_temp_folders()
         app._cleanup_predictor()
         root.destroy()
     
