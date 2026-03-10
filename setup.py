@@ -9,29 +9,30 @@ from setuptools import find_packages, setup
 
 # Package metadata
 NAME = "SAM2-Mask-Generator"
-VERSION = "1.0"
+VERSION = "2.0"
 DESCRIPTION = "SAM 2 Mask Generator for Digital Image Correlation (DIC) and ROI Recognition"
 URL = "https://www.researchsquare.com/article/rs-5566473/v1"  # Your research paper
 AUTHOR = "Zixiang Tong"  # Replace with your actual name
 AUTHOR_EMAIL = "zachtong@utexas.edu"  # Replace with your email
-LICENSE = "Apache 2.0"
+LICENSE = "MIT"
 
 # Read the contents of README file
 with open("README.md", "r", encoding="utf-8") as f:
     LONG_DESCRIPTION = f.read()
 
-# Required dependencies (matching README.md requirements)
+# Required dependencies
+# NOTE: PyTorch with CUDA must be installed separately before running setup.py:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 REQUIRED_PACKAGES = [
-    "torch>=2.0.0",
-    "torchvision>=0.15.0", 
     "numpy>=1.24.4",
     "tqdm>=4.66.1",
     "hydra-core>=1.3.2",
-    "iopath>=0.1.10",        # Added for SAM2 file I/O operations
-    "omegaconf>=2.3.0",      # Added for Hydra configuration management
+    "iopath>=0.1.10",
+    "omegaconf>=2.3.0",
     "pillow>=9.4.0",
-    "opencv-python>=4.7.0",  # Added for image processing
-    "matplotlib>=3.6.0",     # Added for GUI plotting
+    "opencv-python>=4.7.0",
+    "scipy>=1.10.0",
+    "PyQt6>=6.6.0",
 ]
 
 EXTRA_PACKAGES = {
@@ -171,7 +172,7 @@ setup(
     include_package_data=True,
     install_requires=REQUIRED_PACKAGES,
     extras_require=EXTRA_PACKAGES,
-    python_requires=">=3.8.0",  # Matching README.md requirement
+    python_requires=">=3.10.0",
     ext_modules=get_extensions(),
     cmdclass=cmdclass,
 )

@@ -1,170 +1,152 @@
-# SAM 2 Mask Generator
-A comprehensive software package designed for automatic Digital Image Correlation (DIC) or other Region of Interest (ROI) recognition, mask generation, and smoothing. This tool leverages the Segment Anything Model 2 (SAM 2) for intelligent mask generation and provides advanced spatial and temporal smoothing capabilities.
+# SAM2 Studio — Mask Generator for DIC & ROI Recognition
 
-## Overview
-This software package consists of two primary components:
-- **SAM 2 Mask Generator** (Python-based GUI application)
-![Demo video](assets/Mask_generator_demo_video.gif)
-
-- **Mask Smoothing Module** (MATLAB-based processing tools)
-![Demo video](assets/Smoothing_demo_video.gif)
-
-The complete source code, along with installation instructions, is available in our GitHub repository. Users should consult this README.md file for detailed installation and setup instructions to ensure proper configuration for use.
+A professional GUI application for automatic Digital Image Correlation (DIC) and Region of Interest (ROI) mask generation using Segment Anything Model 2 (SAM2). Built with PyQt6 and MVC architecture.
 
 ## Features
 
-### SAM 2 Mask Generator
-- **Interactive GUI**: User-friendly interface for mask generation
-- **Multi-model Support**: Four pre-trained SAM 2 models (Large, Base Plus, Small, Tiny)
-- **Real-time Processing**: Live mask display and progress tracking
-- **GPU/CPU Support**: Flexible computing resource utilization
-- **Batch Processing**: Efficient handling of image sequences
-- **Point-based Annotation**: Interactive foreground/background point marking
-
-### Mask Smoothing Module
-- **Spatial Smoothing**: Advanced diffusion-based smoothing algorithms
-- **Temporal Smoothing**: Frame-to-frame consistency enhancement
-- **Real-time Visualization**: Live preview of smoothing progress
-- **Parameter Optimization**: Comprehensive control over smoothing parameters
-- **Noise Reduction**: Intelligent handling of high-noise frames
+- **Interactive Annotation**: Point-based foreground/background marking with undo/redo
+- **Multi-model Support**: SAM2 Hiera Large / Base Plus / Small / Tiny
+- **GPU Accelerated**: CUDA auto-detection for RTX/Tesla GPUs (~100x faster than CPU)
+- **Real-time Preview**: Live mask overlay during propagation
+- **Smart Processing**: Auto-downsamples large images for inference, upscales masks to original resolution
+- **Post-processing**: Built-in Perona-Malik spatial smoothing and 3D Gaussian temporal smoothing
+- **Mid-sequence Correction**: Re-propagate from any frame with new annotation points
+- **Keyboard Shortcuts**: Full keyboard workflow (V/D/E/Space/Ctrl+Z/Y/S/O)
 
 ## Installation
 
 ### Prerequisites
-- Python 3.8 or higher
-- MATLAB (for Mask Smoothing Module)
-- CUDA-compatible GPU (optional, for accelerated processing)
 
-### Python Dependencies
-## Method 1:
-```cmd
-pip install torch torchvision
-pip install opencv-python
-pip install matplotlib
-pip install pillow
-pip install numpy
-pip install tqdm
-pip install hydra-core
-pip install iopath
-pip install tkinter
+- Python 3.10+
+- NVIDIA GPU with CUDA support (recommended)
+- SAM2 model checkpoints
+
+### Step 1: Install PyTorch with CUDA
+
+Check your NVIDIA driver version with `nvidia-smi`, then install the matching PyTorch:
+
+```bash
+# CUDA 12.8 (driver >= 570)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# CUDA 12.6 (driver >= 560)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
+# CPU only (no GPU)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
-## Method 2:
-```cmd
+
+Verify CUDA is working:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+# Expected: True NVIDIA GeForce RTX ...
+```
+
+### Step 2: Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Or install as a package:
+
+```bash
 pip install -e .
 ```
 
-### SAM 2 Model Download
-Download the pre-trained SAM 2 models from the official repository and place them in the `checkpoints/` directory:
-- `sam2.1_hiera_large.pt`
-- `sam2.1_hiera_base_plus.pt`
-- `sam2.1_hiera_small.pt`
-- `sam2.1_hiera_tiny.pt`
+### Step 3: Download SAM2 checkpoints
+
+Download model files from [facebookresearch/sam2](https://github.com/facebookresearch/sam2) and place in `checkpoints/`:
+
+```
+checkpoints/
+├── sam2.1_hiera_large.pt
+├── sam2.1_hiera_base_plus.pt
+├── sam2.1_hiera_small.pt
+└── sam2.1_hiera_tiny.pt
+```
 
 ## Usage
 
-### SAM 2 Mask Generator
+```bash
+python main.py
+```
 
-1. **Launch the Application**
-   ```bash
-   python main.py
-   ```
+### Workflow
 
-2. **Configure Input/Output**
-   - Select input directory containing raw DIC images
-   - Choose output directory for generated masks
-   - Set frame range for processing (optional)
+1. **Set directories** — Paste or browse input image folder and output folder
+2. **Navigate frames** — Use slider or Left/Right arrow keys
+3. **Annotate** — Click to add foreground points (V), background points (D); Ctrl+Z to undo
+4. **Process** — Click Start Processing or press Ctrl+Enter
+5. **Review** — Browse generated masks with real-time overlay
+6. **Correct** — Add correction points on any frame, re-propagate (E to enter correction mode)
+7. **Smooth** — Apply spatial or temporal smoothing from the sidebar
 
-3. **Mark Control Points**
-   - Click "Start Drawing Points" to enable annotation mode
-   - Mark foreground points (red) for target ROI
-   - Mark background points (blue) for excluded regions
-   - Use "Mode" toggle to switch between foreground/background
+### Keyboard Shortcuts
 
-4. **Select Processing Options**
-   - Choose computing device (GPU/CPU)
-   - Select SAM 2 model size based on accuracy/speed requirements
-   - Configure processing parameters
+| Key | Action |
+|-----|--------|
+| V | Foreground point mode |
+| D | Background point mode |
+| E | Enter correction mode |
+| Space | Toggle overlay visibility |
+| Ctrl+Z | Undo annotation |
+| Ctrl+Y | Redo annotation |
+| Ctrl+S | Save annotation config |
+| Ctrl+O | Load annotation config |
+| Ctrl+Enter | Start processing |
+| Left/Right | Previous/Next frame |
+| Home/End | First/Last frame |
+| Escape | Cancel processing |
 
-5. **Generate Masks**
-   - Click "Start Processing" to begin mask generation
-   - Monitor real-time progress and results
-   - Generated masks are automatically saved to output directory
+## Project Structure
 
-### Mask Smoothing Module
-
-#### Spatial Smoothing
-1. Launch `imageSmoothingGUI.m` in MATLAB
-2. Select "Spatial Smoothing" mode
-3. Configure input/output directories
-4. Adjust smoothing parameters:
-   - **Iteration**: Maximum smoothing iterations
-   - **Time Step**: Smoothing intensity per iteration
-   - **Lambda**: Gradient sensitivity control
-   - **Gaussian Sigma/Size**: Filter spread and window size
-5. Enable "Real-time Visualization" for live preview
-6. Start processing
-
-#### Temporal Smoothing
-1. Select "Temporal Smoothing" mode
-2. Set input directory to spatially smoothed masks
-3. Configure temporal parameters:
-   - **Variance Threshold**: Maximum allowable variance for noise detection
-   - **Number of Neighbors**: Adjacent frames for continuity
-   - **Gaussian Sigma**: Temporal filter spread
-   - **3D Kernel Size**: Spatial-temporal smoothing extent
-4. Process the sequence for temporal consistency
-
-## Parameters Guide
-
-### SAM 2 Models
-- **Large**: Highest accuracy, slower processing
-- **Base Plus**: Balanced accuracy and speed
-- **Small**: Faster processing, moderate accuracy
-- **Tiny**: Fastest processing, basic accuracy
-
-### Spatial Smoothing Parameters
-- **Iteration**: Controls smoothing intensity (typically 10-50)
-- **Time Step**: Affects convergence speed (0.1-1.0)
-- **Lambda**: Gradient sensitivity (0.1-10.0)
-- **Gaussian Sigma**: Filter spread (1.0-5.0)
-- **Gaussian Size**: Window size (3-15)
-
-### Temporal Smoothing Parameters
-- **Variance Threshold**: Noise detection sensitivity (0.01-0.1)
-- **Neighbors**: Temporal window size (3-7)
-- **Gaussian Sigma**: Temporal smoothing (0.5-2.0)
-- **3D Kernel Size**: Combined smoothing (3-7)
-
-## File Structure
-    Mask_generater/
-    ├── main.py # SAM 2 Mask Generator GUI
-    ├── imageSmoothingGUI.m # Mask Smoothing Module
-    ├── checkpoints/ # SAM 2 model files
-    ├── examples/ # Sample images and masks
-    ├── sam2/ # SAM 2 implementation
-    ├── training/ # Training utilities
-    └── tools/ # Additional tools
-
+```
+Mask_generater/
+├── main.py                    # Application entry point
+├── controllers/               # MVC controllers
+│   ├── app_state.py           # Central state manager
+│   ├── annotation_controller.py  # Undo/redo annotation commands
+│   ├── processing_controller.py  # Background mask generation workers
+│   └── smoothing_controller.py   # Spatial/temporal smoothing workers
+├── core/                      # Core algorithms
+│   ├── mask_generator.py      # SAM2 video predictor wrapper
+│   ├── image_processing.py    # Image loading/conversion utilities
+│   ├── spatial_smoothing.py   # Perona-Malik anisotropic diffusion
+│   └── temporal_smoothing.py  # 3D Gaussian temporal smoothing
+├── gui/                       # PyQt6 GUI
+│   ├── main_window.py         # Main window with signal wiring
+│   ├── panels/                # Sidebar, canvas, frame navigator, status bar
+│   ├── widgets/               # Reusable widgets (path selector, etc.)
+│   ├── theme.py               # Dark theme colors and fonts
+│   └── icons.py               # SVG icon generator
+├── utils/                     # Utilities
+│   └── device_manager.py      # GPU detection and VRAM monitoring
+├── sam2/                      # SAM2 model implementation (Meta)
+├── checkpoints/               # Model weight files (not tracked)
+├── tests/                     # Test suite (172 tests)
+└── requirements.txt           # Python dependencies
+```
 
 ## Performance Tips
 
-1. **Model Selection**: Choose appropriate model size based on accuracy requirements
-2. **Batch Processing**: Process large sequences in batches
-3. **Memory Management**: Monitor system memory during large-scale processing
-4. **Parameter Tuning**: Experiment with smoothing parameters for optimal results
+- **Use GPU**: CUDA gives ~100x speedup over CPU for mask propagation
+- **Model selection**: `hiera_tiny` is ~5x faster than `hiera_large` with acceptable quality for most DIC
+- **Auto-downsampling**: Large images (>1024px) are automatically downsampled for inference, masks are upscaled to original resolution
+- **Parallel conversion**: Image format conversion uses multi-threaded I/O
 
 ## Troubleshooting
 
-### Common Issues
-- **CUDA Out of Memory**: Reduce batch size or use smaller model
-- **Slow Processing**: Switch to GPU or use smaller model
-- **Poor Mask Quality**: Add more control points or adjust smoothing parameters
-- **MATLAB Errors**: Ensure MATLAB is properly installed and licensed
-
-### Support
-For technical support and bug reports, please refer to the GitHub repository issues page.
+| Problem | Solution |
+|---------|----------|
+| `torch.cuda.is_available()` returns `False` | You have CPU-only PyTorch. Reinstall with CUDA index URL (see Step 1) |
+| CUDA out of memory | Use a smaller model (Tiny/Small) or reduce frame count |
+| Slow processing | Check GPU is detected (shown in status bar). Use Tiny model for preview |
+| `Cannot find primary config` | Ensure `sam2/configs/` directory exists with yaml files |
+| Masks look blocky | Expected from auto-downsampling. Adjust annotation points for better coverage |
 
 ## Citation
 
-If you use this software in your research, please cite our preprint:
+If you use this software in your research, please cite:
 https://www.researchsquare.com/article/rs-5566473/v1
