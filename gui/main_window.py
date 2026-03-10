@@ -61,6 +61,15 @@ class MainWindow(QMainWindow):
         self._processing = processing_controller
         self._smoothing = smoothing_controller
 
+        # Cached downsampled first frame for real-time preprocessing preview
+        # BGR format, max 1024px on longest side
+        self._cached_preview_frame: Optional['np.ndarray'] = None
+
+        # Original display image dimensions (h, w) for coordinate consistency.
+        # Preprocessing preview is upscaled to these dimensions so annotation
+        # points stay in the same coordinate space as the original image.
+        self._original_display_size: Optional[tuple[int, int]] = None
+
         self.setWindowTitle("SAM2 Studio")
         self.setMinimumSize(1200, 700)
 
@@ -193,9 +202,6 @@ class MainWindow(QMainWindow):
 
         self._sidebar.preprocessing_preview_requested.connect(
             self._on_preview_preprocessing
-        )
-        self._sidebar.preprocessing_preview_reset.connect(
-            self._on_reset_preprocessing_preview
         )
 
         if smoothing is not None:
@@ -494,6 +500,7 @@ class MainWindow(QMainWindow):
             self._state.set_input_dir(path)
             if self._state.image_files:
                 self._load_current_frame()
+                self._cache_preview_frame()
                 self._state.set_state(
                     self._state.State.ANNOTATING
                 )
@@ -709,9 +716,8 @@ class MainWindow(QMainWindow):
     def _on_frame_processed(self, frame_idx: int, mask) -> None:
         """Update all three panels during propagation.
 
-        Loads display-sized original from converted JPEG (fast, ~100KB local)
-        and creates overlay at display resolution. Full-resolution originals
-        are only loaded during annotation/correction, not during propagation.
+        Loads display-sized original from the directory SAM2 used (preprocessed
+        if available, otherwise converted). Creates overlay at display resolution.
         """
         if self._state is None:
             return
@@ -720,12 +726,21 @@ class MainWindow(QMainWindow):
         import cv2
         from core.image_processing import load_image_as_rgb, create_overlay
 
-        # Load display-sized original from converted JPEG (already on local disk)
         output_dir = self._state.output_dir
         fmt = "jpeg" if "jpeg" in self._state.intermediate_format.lower() else "png"
         ext = ".jpg" if fmt == "jpeg" else ".png"
-        display_path = os.path.join(
-            output_dir, f"converted_{fmt}", f"{frame_idx:06d}{ext}"
+        filename = f"{frame_idx:06d}{ext}"
+
+        # Prefer preprocessed (what SAM2 actually sees), fall back to converted
+        preprocessed_path = os.path.join(
+            output_dir, f"preprocessed_{fmt}", filename,
+        )
+        converted_path = os.path.join(
+            output_dir, f"converted_{fmt}", filename,
+        )
+        display_path = (
+            preprocessed_path if os.path.exists(preprocessed_path)
+            else converted_path
         )
 
         display_original = None
@@ -769,47 +784,81 @@ class MainWindow(QMainWindow):
 
     # --- Preprocessing preview handlers ---
 
+    def _cache_preview_frame(self) -> None:
+        """Cache a downsampled BGR copy of the first frame for preview.
+
+        Uses load_image_as_rgb (with PIL fallback) to handle TIFF, 16-bit,
+        and other special formats that raw cv2.imread may not read.
+        """
+        self._cached_preview_frame = None
+        if self._state is None or not self._state.image_files:
+            return
+
+        try:
+            import cv2
+            from core.image_processing import load_image_as_rgb
+
+            first_path = self._state.image_files[0]
+            img_rgb = load_image_as_rgb(first_path)
+            if img_rgb is None:
+                logger.warning(f"Failed to load first frame for preview: {first_path}")
+                return
+
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+            # Downsample to max 1024px for fast preview
+            h, w = img_bgr.shape[:2]
+            max_dim = 1024
+            if max(h, w) > max_dim:
+                scale = max_dim / max(h, w)
+                img_bgr = cv2.resize(
+                    img_bgr,
+                    (int(w * scale), int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+            self._cached_preview_frame = img_bgr
+            logger.debug(f"Cached preview frame: {img_bgr.shape}")
+        except Exception as e:
+            logger.warning(f"Failed to cache preview frame: {e}")
+
     def _on_preview_preprocessing(self, config) -> None:
-        """Preview preprocessing effect on current frame."""
-        if self._state is None or self._state.current_original is None:
+        """Real-time preview: apply preprocessing to cached first frame.
+
+        The preview is computed on a downsampled (1024px) copy for speed,
+        then upscaled to match the original image dimensions.  This keeps
+        the scene rect and annotation-point coordinate system consistent
+        with the full-resolution original.
+        """
+        if config.is_identity():
+            # No preprocessing — reload the crisp original frame
+            self._load_current_frame()
+            return
+
+        # Lazy init: populate cache if images were loaded before this code existed
+        if self._cached_preview_frame is None:
+            self._cache_preview_frame()
+        if self._cached_preview_frame is None:
             return
 
         from core.preprocessing import apply_pipeline
         import cv2
 
-        # Current original is RGB; preprocessing works on BGR
-        original_bgr = cv2.cvtColor(
-            self._state.current_original, cv2.COLOR_RGB2BGR,
-        )
+        processed = apply_pipeline(self._cached_preview_frame, config)
+        preview_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
 
-        # Downsample for fast preview if large
-        h, w = original_bgr.shape[:2]
-        max_preview = 1024
-        if max(h, w) > max_preview:
-            scale = max_preview / max(h, w)
-            preview_bgr = cv2.resize(
-                original_bgr,
-                (int(w * scale), int(h * scale)),
-                interpolation=cv2.INTER_AREA,
-            )
-        else:
-            preview_bgr = original_bgr
+        # Upscale to original resolution so the scene rect stays unchanged
+        # and annotation points remain in the correct coordinate space.
+        if self._original_display_size is not None:
+            orig_h, orig_w = self._original_display_size
+            ph, pw = preview_rgb.shape[:2]
+            if (ph, pw) != (orig_h, orig_w):
+                preview_rgb = cv2.resize(
+                    preview_rgb, (orig_w, orig_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
 
-        processed = apply_pipeline(preview_bgr, config)
-        processed_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-
-        # Scale back to original display size if needed
-        if processed_rgb.shape[:2] != (h, w):
-            processed_rgb = cv2.resize(
-                processed_rgb, (w, h),
-                interpolation=cv2.INTER_LINEAR,
-            )
-
-        self._state.set_display_images(original=processed_rgb)
-
-    def _on_reset_preprocessing_preview(self) -> None:
-        """Reset to the unprocessed original image."""
-        self._load_current_frame()
+        self._state.set_display_images(original=preview_rgb)
 
     # --- Smoothing handlers ---
 
@@ -918,6 +967,7 @@ class MainWindow(QMainWindow):
             image_path = files[frame - 1]  # current_frame is 1-based
             image = load_image_as_rgb(image_path)
             if image is not None:
+                self._original_display_size = (image.shape[0], image.shape[1])
                 self._state.set_display_images(original=image)
 
                 # Also try to load existing mask and overlay
@@ -938,9 +988,9 @@ class MainWindow(QMainWindow):
 
         try:
             import cv2
-            from core.image_processing import create_overlay
+            from core.image_processing import create_overlay, imread_safe
 
-            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            mask = imread_safe(mask_path, cv2.IMREAD_GRAYSCALE)
             if mask is not None and self._state.current_original is not None:
                 overlay = create_overlay(
                     self._state.current_original, mask

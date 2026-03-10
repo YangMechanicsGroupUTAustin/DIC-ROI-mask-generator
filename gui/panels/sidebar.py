@@ -105,7 +105,6 @@ class Sidebar(QWidget):
     format_changed = pyqtSignal(str)
     threshold_changed = pyqtSignal(float)
     preprocessing_preview_requested = pyqtSignal(object)  # PreprocessingConfig
-    preprocessing_preview_reset = pyqtSignal()
     spatial_smooth_requested = pyqtSignal(dict)
     temporal_smooth_requested = pyqtSignal(dict)
 
@@ -155,6 +154,133 @@ class Sidebar(QWidget):
         file_section.add_widget(self._output_path)
 
         scroll_layout.addWidget(file_section)
+
+        # --- Preprocessing section (before model config — logically first) ---
+        preprocess_section = CollapsibleSection(
+            "Preprocessing", icon_name="sliders", default_open=False
+        )
+
+        # Gain slider
+        self._pp_gain = SliderInput(
+            "Gain", default=1.0, min_val=0.1, max_val=5.0,
+            step=0.01, decimals=2,
+        )
+        self._pp_gain.setToolTip(
+            "Linear multiplier for pixel intensity.\n1.0 = no change."
+        )
+        self._pp_gain.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_gain)
+
+        # Brightness slider
+        self._pp_brightness = SliderInput(
+            "Brightness", default=0, min_val=-255, max_val=255,
+            step=1, decimals=0,
+        )
+        self._pp_brightness.setToolTip(
+            "Additive brightness offset.\n0 = no change."
+        )
+        self._pp_brightness.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_brightness)
+
+        # Contrast slider
+        self._pp_contrast = SliderInput(
+            "Contrast", default=1.0, min_val=0.0, max_val=5.0,
+            step=0.01, decimals=2,
+        )
+        self._pp_contrast.setToolTip(
+            "Contrast factor around midpoint (128).\n1.0 = no change."
+        )
+        self._pp_contrast.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_contrast)
+
+        # Clip Min / Max sliders
+        self._pp_clip_min = SliderInput(
+            "Clip Min", default=0, min_val=0, max_val=254,
+            step=1, decimals=0,
+        )
+        self._pp_clip_min.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_clip_min)
+
+        self._pp_clip_max = SliderInput(
+            "Clip Max", default=255, min_val=1, max_val=255,
+            step=1, decimals=0,
+        )
+        self._pp_clip_max.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_clip_max)
+
+        # CLAHE checkbox + params
+        self._pp_clahe_check = QCheckBox("CLAHE (Adaptive Histogram Eq.)")
+        self._pp_clahe_check.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
+            f"background: transparent;"
+        )
+        self._pp_clahe_check.stateChanged.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_clahe_check)
+
+        pp_grid3 = QWidget()
+        pp_grid3_layout = QGridLayout(pp_grid3)
+        pp_grid3_layout.setContentsMargins(0, 0, 0, 0)
+        pp_grid3_layout.setSpacing(8)
+
+        self._pp_clahe_clip = NumberInput(
+            "CLAHE Clip", default=2.0, min_val=0.1, max_val=40.0,
+            step=0.5, decimals=1, icon_name="gauge",
+        )
+        self._pp_clahe_clip.value_changed.connect(self._on_pp_changed)
+        pp_grid3_layout.addWidget(self._pp_clahe_clip, 0, 0)
+
+        self._pp_clahe_tile = NumberInput(
+            "Tile Size", default=8, min_val=2, max_val=32,
+            step=1, decimals=0, icon_name="hash",
+        )
+        self._pp_clahe_tile.value_changed.connect(self._on_pp_changed)
+        pp_grid3_layout.addWidget(self._pp_clahe_tile, 0, 1)
+
+        preprocess_section.add_widget(pp_grid3)
+
+        # Gaussian Smooth slider
+        self._pp_gaussian = SliderInput(
+            "Gaussian Sigma", default=0.0, min_val=0.0, max_val=10.0,
+            step=0.1, decimals=1,
+        )
+        self._pp_gaussian.setToolTip("Gaussian blur sigma. 0 = disabled.")
+        self._pp_gaussian.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_gaussian)
+
+        # Bilateral Filter checkbox
+        self._pp_bilateral_check = QCheckBox("Bilateral Filter (Edge-Preserving)")
+        self._pp_bilateral_check.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
+            f"background: transparent;"
+        )
+        self._pp_bilateral_check.stateChanged.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_bilateral_check)
+
+        # Binary Threshold checkbox + params
+        self._pp_threshold_check = QCheckBox("Binary Threshold")
+        self._pp_threshold_check.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
+            f"background: transparent;"
+        )
+        self._pp_threshold_check.stateChanged.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_threshold_check)
+
+        self._pp_threshold_val = SliderInput(
+            "Threshold Value", default=127, min_val=0, max_val=255,
+            step=1, decimals=0,
+        )
+        self._pp_threshold_val.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_threshold_val)
+
+        self._pp_threshold_method = SelectField(
+            "Threshold Method",
+            options=["Fixed", "Otsu", "Adaptive"],
+            default="Fixed",
+        )
+        self._pp_threshold_method.value_changed.connect(self._on_pp_changed)
+        preprocess_section.add_widget(self._pp_threshold_method)
+
+        scroll_layout.addWidget(preprocess_section)
 
         # --- Model Configuration section ---
         model_section = CollapsibleSection(
@@ -217,153 +343,6 @@ class Sidebar(QWidget):
         model_section.add_widget(self._threshold_slider)
 
         scroll_layout.addWidget(model_section)
-
-        # --- Preprocessing section ---
-        preprocess_section = CollapsibleSection(
-            "Preprocessing", icon_name="sliders", default_open=False
-        )
-
-        # Gain + Brightness row
-        pp_grid1 = QWidget()
-        pp_grid1_layout = QGridLayout(pp_grid1)
-        pp_grid1_layout.setContentsMargins(0, 0, 0, 0)
-        pp_grid1_layout.setSpacing(8)
-
-        self._pp_gain = NumberInput(
-            "Gain", default=1.0, min_val=0.1, max_val=5.0,
-            step=0.1, decimals=2, icon_name="zap",
-        )
-        self._pp_gain.setToolTip(
-            "Linear multiplier for pixel intensity.\n1.0 = no change."
-        )
-        pp_grid1_layout.addWidget(self._pp_gain, 0, 0)
-
-        self._pp_brightness = NumberInput(
-            "Brightness", default=0, min_val=-255, max_val=255,
-            step=1, decimals=0, icon_name="hash",
-        )
-        self._pp_brightness.setToolTip(
-            "Additive brightness offset.\n0 = no change."
-        )
-        pp_grid1_layout.addWidget(self._pp_brightness, 0, 1)
-
-        preprocess_section.add_widget(pp_grid1)
-
-        # Contrast
-        self._pp_contrast = NumberInput(
-            "Contrast", default=1.0, min_val=0.0, max_val=5.0,
-            step=0.1, decimals=2, icon_name="sigma",
-        )
-        self._pp_contrast.setToolTip(
-            "Contrast factor around midpoint (128).\n1.0 = no change."
-        )
-        preprocess_section.add_widget(self._pp_contrast)
-
-        # Min/Max Clip row
-        pp_grid2 = QWidget()
-        pp_grid2_layout = QGridLayout(pp_grid2)
-        pp_grid2_layout.setContentsMargins(0, 0, 0, 0)
-        pp_grid2_layout.setSpacing(8)
-
-        self._pp_clip_min = NumberInput(
-            "Clip Min", default=0, min_val=0, max_val=254,
-            step=1, decimals=0, icon_name="hash",
-        )
-        pp_grid2_layout.addWidget(self._pp_clip_min, 0, 0)
-
-        self._pp_clip_max = NumberInput(
-            "Clip Max", default=255, min_val=1, max_val=255,
-            step=1, decimals=0, icon_name="hash",
-        )
-        pp_grid2_layout.addWidget(self._pp_clip_max, 0, 1)
-
-        preprocess_section.add_widget(pp_grid2)
-
-        # CLAHE
-        self._pp_clahe_check = QCheckBox("CLAHE (Adaptive Histogram Eq.)")
-        self._pp_clahe_check.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
-            f"background: transparent;"
-        )
-        preprocess_section.add_widget(self._pp_clahe_check)
-
-        pp_grid3 = QWidget()
-        pp_grid3_layout = QGridLayout(pp_grid3)
-        pp_grid3_layout.setContentsMargins(0, 0, 0, 0)
-        pp_grid3_layout.setSpacing(8)
-
-        self._pp_clahe_clip = NumberInput(
-            "CLAHE Clip", default=2.0, min_val=0.1, max_val=40.0,
-            step=0.5, decimals=1, icon_name="gauge",
-        )
-        pp_grid3_layout.addWidget(self._pp_clahe_clip, 0, 0)
-
-        self._pp_clahe_tile = NumberInput(
-            "Tile Size", default=8, min_val=2, max_val=32,
-            step=1, decimals=0, icon_name="hash",
-        )
-        pp_grid3_layout.addWidget(self._pp_clahe_tile, 0, 1)
-
-        preprocess_section.add_widget(pp_grid3)
-
-        # Gaussian Smooth
-        self._pp_gaussian = NumberInput(
-            "Gaussian Sigma", default=0.0, min_val=0.0, max_val=10.0,
-            step=0.1, decimals=1, icon_name="waves",
-        )
-        self._pp_gaussian.setToolTip("Gaussian blur sigma. 0 = disabled.")
-        preprocess_section.add_widget(self._pp_gaussian)
-
-        # Bilateral Filter
-        self._pp_bilateral_check = QCheckBox("Bilateral Filter (Edge-Preserving)")
-        self._pp_bilateral_check.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
-            f"background: transparent;"
-        )
-        preprocess_section.add_widget(self._pp_bilateral_check)
-
-        # Binary Threshold
-        self._pp_threshold_check = QCheckBox("Binary Threshold")
-        self._pp_threshold_check.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
-            f"background: transparent;"
-        )
-        preprocess_section.add_widget(self._pp_threshold_check)
-
-        pp_grid4 = QWidget()
-        pp_grid4_layout = QGridLayout(pp_grid4)
-        pp_grid4_layout.setContentsMargins(0, 0, 0, 0)
-        pp_grid4_layout.setSpacing(8)
-
-        self._pp_threshold_val = NumberInput(
-            "Threshold", default=127, min_val=0, max_val=255,
-            step=1, decimals=0, icon_name="hash",
-        )
-        pp_grid4_layout.addWidget(self._pp_threshold_val, 0, 0)
-
-        self._pp_threshold_method = SelectField(
-            "Method",
-            options=["Fixed", "Otsu", "Adaptive"],
-            default="Fixed",
-        )
-        pp_grid4_layout.addWidget(self._pp_threshold_method, 0, 1)
-
-        preprocess_section.add_widget(pp_grid4)
-
-        # Preview + Reset buttons
-        self._pp_preview_btn = _create_accent_button("Preview Preprocessing")
-        self._pp_preview_btn.clicked.connect(self._on_preview_preprocessing)
-        preprocess_section.add_widget(self._pp_preview_btn)
-
-        self._pp_reset_btn = QPushButton("Reset to Original")
-        self._pp_reset_btn.setMinimumHeight(30)
-        self._pp_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._pp_reset_btn.clicked.connect(
-            lambda: self.preprocessing_preview_reset.emit()
-        )
-        preprocess_section.add_widget(self._pp_reset_btn)
-
-        scroll_layout.addWidget(preprocess_section)
 
         # --- Spatial Smoothing section ---
         spatial_section = CollapsibleSection(
@@ -503,7 +482,8 @@ class Sidebar(QWidget):
 
     # --- Private slots ---
 
-    def _on_preview_preprocessing(self) -> None:
+    def _on_pp_changed(self, *args) -> None:
+        """Emit current preprocessing config on any slider/checkbox change."""
         config = self.get_preprocessing_config()
         self.preprocessing_preview_requested.emit(config)
 

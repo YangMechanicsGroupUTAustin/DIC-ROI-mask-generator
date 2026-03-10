@@ -37,7 +37,8 @@ class DeviceManager:
         """Return (used_gb, total_gb). Returns (0, 0) for CPU/MPS."""
         if torch.cuda.is_available():
             used = torch.cuda.memory_allocated(0) / (1024 ** 3)
-            total = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+            props = torch.cuda.get_device_properties(0)
+            total = getattr(props, "total_memory", getattr(props, "total_mem", 0)) / (1024 ** 3)
             return round(used, 1), round(total, 1)
         return 0.0, 0.0
 

@@ -22,6 +22,7 @@ class MaskGenerator:
         self._predictor = None
         self._inference_state = None
         self._config_key: Optional[tuple] = None
+        self._video_dir: Optional[str] = None
         self._base_dir = base_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def initialize(
@@ -33,7 +34,8 @@ class MaskGenerator:
     ) -> None:
         """Load SAM2 model. Reuses existing if config matches."""
         checkpoint_path = os.path.join(self._base_dir, "checkpoints", checkpoint)
-        config_path = os.path.join("sam2", "configs", "sam2.1", model_cfg)
+        # Hydra searches from pkg://sam2, so path is relative to sam2 package root
+        config_path = f"configs/sam2.1/{model_cfg}"
         new_key = (checkpoint_path, config_path, device)
 
         if self._predictor is not None and self._config_key == new_key:
@@ -56,12 +58,23 @@ class MaskGenerator:
         logger.info("SAM2 model loaded successfully")
 
     def set_video(self, image_dir: str) -> None:
-        """Initialize inference state from image directory."""
+        """Initialize inference state from image directory.
+
+        Optimized: if the same directory was already loaded, uses reset_state()
+        to clear prompts/masks without re-reading video frames from disk.
+        """
         if self._predictor is None:
             raise RuntimeError("Predictor not initialized. Call initialize() first.")
 
-        logger.info(f"Setting video from: {image_dir}")
+        if self._inference_state is not None and self._video_dir == image_dir:
+            # Same directory — reset state without re-reading frames
+            self._predictor.reset_state(self._inference_state)
+            logger.info(f"Reset inference state (reusing loaded frames from {image_dir})")
+            return
+
+        logger.info(f"Loading video frames from: {image_dir}")
         self._inference_state = self._predictor.init_state(video_path=image_dir)
+        self._video_dir = image_dir
 
     def add_points(
         self,
@@ -97,15 +110,24 @@ class MaskGenerator:
         self,
         threshold: float = 0.0,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        frame_callback: Optional[Callable[[int, np.ndarray], None]] = None,
+        stop_check: Optional[Callable[[], bool]] = None,
+        start_frame_idx: Optional[int] = None,
     ) -> dict[int, np.ndarray]:
-        """Run mask propagation through all frames.
+        """Run mask propagation through frames.
 
         Args:
             threshold: Mask logit threshold.
-            progress_callback: Called with (frame_idx, total_frames).
+            progress_callback: Called with (frame_count, total_frames).
+            frame_callback: Called with (frame_idx, binary_mask) per frame.
+                When provided, masks are NOT accumulated in memory.
+            stop_check: Callable returning True when propagation should stop.
+            start_frame_idx: 0-based frame to start from. None = earliest
+                annotated frame. Passed directly to SAM2's propagate_in_video.
 
         Returns:
-            Dict mapping frame_idx to binary mask (uint8, 0 or 255).
+            Dict mapping frame_idx to binary mask. Empty if frame_callback
+            is used (caller handles each frame via callback).
         """
         if self._predictor is None or self._inference_state is None:
             raise RuntimeError("Predictor or inference state not initialized.")
@@ -114,15 +136,24 @@ class MaskGenerator:
         frame_count = 0
 
         for out_frame_idx, out_obj_ids, out_mask_logits in self._predictor.propagate_in_video(
-            self._inference_state
+            self._inference_state,
+            start_frame_idx=start_frame_idx,
         ):
+            if stop_check and stop_check():
+                logger.info("Propagation stopped by user")
+                break
+
             mask = (out_mask_logits[0] > threshold).cpu().numpy().squeeze()
             binary_mask = mask.astype(np.uint8) * 255
-            video_segments[out_frame_idx] = binary_mask
             frame_count += 1
 
+            if frame_callback:
+                frame_callback(out_frame_idx, binary_mask)
+            else:
+                video_segments[out_frame_idx] = binary_mask
+
             if progress_callback:
-                progress_callback(frame_count, -1)  # total unknown during propagation
+                progress_callback(frame_count, -1)
 
         logger.info(f"Propagation complete: {frame_count} frames")
         return video_segments
@@ -142,14 +173,21 @@ class MaskGenerator:
         start_frame_idx: int,
         threshold: float = 0.0,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        frame_callback: Optional[Callable[[int, np.ndarray], None]] = None,
+        stop_check: Optional[Callable[[], bool]] = None,
     ) -> dict[int, np.ndarray]:
         """Re-propagate from a specific frame onward.
 
-        Uses the same propagate_in_video but results are filtered
-        to only include frames >= start_frame_idx.
+        Passes start_frame_idx directly to SAM2's propagate_in_video
+        so only frames from the correction point forward are computed.
         """
-        all_segments = self.propagate(threshold, progress_callback)
-        return {k: v for k, v in all_segments.items() if k >= start_frame_idx}
+        return self.propagate(
+            threshold=threshold,
+            progress_callback=progress_callback,
+            frame_callback=frame_callback,
+            stop_check=stop_check,
+            start_frame_idx=start_frame_idx,
+        )
 
     def cleanup(self) -> None:
         """Release model and clear GPU cache."""
@@ -162,6 +200,7 @@ class MaskGenerator:
         self._inference_state = None
         self._predictor = None
         self._config_key = None
+        self._video_dir = None
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

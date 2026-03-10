@@ -31,7 +31,7 @@ def qapp():
 class MockProcessingController(QObject):
     """Mock ProcessingController with real PyQt signals for integration tests."""
     progress = pyqtSignal(int, int, str)
-    frame_processed = pyqtSignal(int, object, object)
+    frame_processed = pyqtSignal(int, object)
     processing_finished = pyqtSignal()
     processing_error = pyqtSignal(str)
 

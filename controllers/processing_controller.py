@@ -14,7 +14,9 @@ import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from core.mask_generator import MaskGenerator
-from core.image_processing import convert_image, get_image_dimensions
+from core.image_processing import (
+    convert_image, get_image_dimensions, imread_safe, imwrite_safe,
+)
 from core.preprocessing import PreprocessingConfig, apply_pipeline
 
 logger = logging.getLogger("sam2studio.processing_controller")
@@ -121,6 +123,28 @@ class ProcessingWorker(QThread):
             self.error.emit(conversion_error)
             return
 
+        # --- Stage 1.5: Apply preprocessing to separate directory ---
+        # converted_dir stays pristine (reusable across runs).
+        # Preprocessed images go to a separate directory for SAM2 input.
+        if not self._preprocessing_config.is_identity():
+            preprocessed_dir = os.path.join(
+                self._output_dir, f"preprocessed_{fmt}",
+            )
+            os.makedirs(preprocessed_dir, exist_ok=True)
+            written = self._apply_preprocessing(
+                converted_dir, preprocessed_dir, ext, total_files,
+            )
+            if written > 0:
+                sam2_input_dir = preprocessed_dir
+            else:
+                logger.warning(
+                    "Preprocessing produced no output files, "
+                    "falling back to converted images"
+                )
+                sam2_input_dir = converted_dir
+        else:
+            sam2_input_dir = converted_dir
+
         # Determine actual downsampled dimensions from converted file
         first_converted = os.path.join(converted_dir, f"000000{ext}")
         conv_dims = get_image_dimensions(first_converted)
@@ -135,10 +159,6 @@ class ProcessingWorker(QThread):
                 f"Downsampled {orig_w}x{orig_h} -> {conv_w}x{conv_h} "
                 f"(scale: {scale_x:.3f}x{scale_y:.3f})"
             )
-
-        # --- Stage 1.5: Apply preprocessing to converted images ---
-        if not self._preprocessing_config.is_identity():
-            self._apply_preprocessing(converted_dir, ext, total_files)
 
         # --- Stage 2: Initialize model ---
         if self._stop_event.is_set():
@@ -160,7 +180,7 @@ class ProcessingWorker(QThread):
             return
 
         self.progress.emit(0, 0, "Initializing video predictor...")
-        self._mask_generator.set_video(converted_dir)
+        self._mask_generator.set_video(sam2_input_dir)
 
         if self._points and self._labels:
             points_arr = np.array(self._points, dtype=np.float32)
@@ -193,7 +213,7 @@ class ProcessingWorker(QThread):
                 )
 
             mask_path = os.path.join(mask_dir, f"mask_{frame_idx:06d}.tiff")
-            cv2.imwrite(mask_path, mask)
+            imwrite_safe(mask_path, mask)
 
             self.frame_processed.emit(frame_idx, mask)
 
@@ -219,7 +239,11 @@ class ProcessingWorker(QThread):
         tasks = []
         for i, img_path in enumerate(self._image_files):
             out_path = os.path.join(converted_dir, f"{i:06d}{ext}")
-            if not self._force_reprocess and os.path.exists(out_path):
+            if (
+                not self._force_reprocess
+                and os.path.exists(out_path)
+                and os.path.getsize(out_path) > 0
+            ):
                 continue
             tasks.append((i, img_path, out_path))
 
@@ -262,32 +286,51 @@ class ProcessingWorker(QThread):
         return None
 
     def _apply_preprocessing(
-        self, converted_dir: str, ext: str, total_files: int,
-    ) -> None:
-        """Apply preprocessing to converted images in-place."""
+        self, src_dir: str, dst_dir: str, ext: str, total_files: int,
+    ) -> int:
+        """Apply preprocessing: read from src_dir, write to dst_dir.
+
+        Source directory (converted images) is never modified, keeping it
+        pristine and reusable across runs with different preprocessing.
+
+        Returns:
+            Number of files successfully written.
+        """
         self.progress.emit(0, total_files, "Applying preprocessing...")
+        written = 0
 
         for i in range(total_files):
             if self._stop_event.is_set():
-                return
+                return written
 
-            img_path = os.path.join(converted_dir, f"{i:06d}{ext}")
-            if not os.path.exists(img_path):
+            src_path = os.path.join(src_dir, f"{i:06d}{ext}")
+            if not os.path.exists(src_path):
+                logger.warning(f"Preprocessing: source not found: {src_path}")
                 continue
 
-            img = cv2.imread(img_path)
+            img = imread_safe(src_path)
             if img is None:
+                logger.warning(f"Preprocessing: imread failed: {src_path}")
                 continue
 
             processed = apply_pipeline(img, self._preprocessing_config)
-            cv2.imwrite(img_path, processed)
+            dst_path = os.path.join(dst_dir, f"{i:06d}{ext}")
+            success = imwrite_safe(dst_path, processed)
+            if not success:
+                logger.warning(f"Preprocessing: imwrite failed: {dst_path}")
+                continue
 
+            written += 1
             self.progress.emit(
                 i + 1, total_files,
                 f"Preprocessing ({i + 1}/{total_files})",
             )
 
-        logger.info("Preprocessing applied to converted images")
+        logger.info(
+            f"Preprocessing: {written}/{total_files} files written "
+            f"({src_dir} -> {dst_dir})"
+        )
+        return written
 
 
 class CorrectionWorker(QThread):
@@ -405,7 +448,7 @@ class CorrectionWorker(QThread):
                 )
 
             mask_path = os.path.join(mask_dir, f"mask_{frame_idx:06d}.tiff")
-            cv2.imwrite(mask_path, mask)
+            imwrite_safe(mask_path, mask)
 
             self.frame_processed.emit(frame_idx, mask)
 

@@ -45,21 +45,29 @@ def mock_mask_generator():
     mg.add_points = MagicMock()
     mg.cleanup = MagicMock()
 
-    def fake_propagate(threshold=0.0, progress_callback=None):
+    def fake_propagate(threshold=0.0, progress_callback=None, frame_callback=None,
+                       stop_check=None, start_frame_idx=None):
         segments = {}
-        for i in range(3):
+        start = start_frame_idx or 0
+        for i in range(start, start + 3):
+            if stop_check and stop_check():
+                break
             mask = np.zeros((50, 50), dtype=np.uint8)
             mask[10:40, 10:40] = 255
-            segments[i] = mask
+            if frame_callback:
+                frame_callback(i, mask)
+            else:
+                segments[i] = mask
             if progress_callback:
-                progress_callback(i + 1, 3)
+                progress_callback(i - start + 1, 3)
         return segments
 
     mg.propagate = MagicMock(side_effect=fake_propagate)
 
-    def fake_propagate_from(start_frame_idx=0, threshold=0.0, progress_callback=None):
-        all_seg = fake_propagate(threshold, progress_callback)
-        return {k: v for k, v in all_seg.items() if k >= start_frame_idx}
+    def fake_propagate_from(start_frame_idx=0, threshold=0.0, progress_callback=None,
+                            frame_callback=None, stop_check=None):
+        return fake_propagate(threshold, progress_callback, frame_callback,
+                              stop_check, start_frame_idx)
 
     mg.propagate_from = MagicMock(side_effect=fake_propagate_from)
     mg.add_correction = MagicMock()
@@ -214,7 +222,7 @@ class TestProcessingWorker:
                 lambda c, t, m: progress_msgs.append((c, t, m))
             )
             worker.frame_processed.connect(
-                lambda idx, mask, overlay: frame_signals.append(idx)
+                lambda idx, mask: frame_signals.append(idx)
             )
             worker.finished.connect(lambda: finished_signals.append(True))
 
@@ -375,6 +383,7 @@ class TestCorrectionWorker:
             threshold=0.0,
             image_files=[],
             output_dir="/tmp/out",
+            intermediate_format="JPEG (fast)",
         )
 
         errors = []
@@ -389,7 +398,7 @@ class TestCorrectionWorker:
         assert len(finished_signals) == 1
 
     def test_correction_success(self, qapp, mock_mask_generator, tmp_image_dir):
-        """Correction worker should re-propagate and save masks."""
+        """Correction worker should re-propagate and save masks from correction frame."""
         from controllers.processing_controller import CorrectionWorker
 
         mock_mask_generator.is_initialized = True
@@ -400,6 +409,13 @@ class TestCorrectionWorker:
         )
 
         with tempfile.TemporaryDirectory() as output_dir:
+            # Create converted_jpeg dir with dummy files so scale factor = 1.0
+            converted_dir = os.path.join(output_dir, "converted_jpeg")
+            os.makedirs(converted_dir, exist_ok=True)
+            for i in range(len(image_files)):
+                dummy = np.zeros((50, 50, 3), dtype=np.uint8)
+                cv2.imwrite(os.path.join(converted_dir, f"{i:06d}.jpg"), dummy)
+
             worker = CorrectionWorker(
                 mask_generator=mock_mask_generator,
                 frame_idx=1,
@@ -408,12 +424,13 @@ class TestCorrectionWorker:
                 threshold=0.0,
                 image_files=image_files,
                 output_dir=output_dir,
+                intermediate_format="JPEG (fast)",
             )
 
             frame_signals = []
             finished_signals = []
             worker.frame_processed.connect(
-                lambda idx, m, o: frame_signals.append(idx)
+                lambda idx, mask: frame_signals.append(idx)
             )
             worker.finished.connect(lambda: finished_signals.append(True))
 
@@ -422,9 +439,120 @@ class TestCorrectionWorker:
             mock_mask_generator.add_correction.assert_called_once()
             mock_mask_generator.propagate_from.assert_called_once()
 
-            # Only frames >= 1 should be emitted (propagate_from filters)
+            # propagate_from should be called with start_frame_idx=1
+            call_kwargs = mock_mask_generator.propagate_from.call_args
+            assert call_kwargs.kwargs.get("start_frame_idx") == 1
+            # stop_check and frame_callback should be passed
+            assert call_kwargs.kwargs.get("stop_check") is not None
+            assert call_kwargs.kwargs.get("frame_callback") is not None
+
+            # All frames should be >= correction frame
             assert all(idx >= 1 for idx in frame_signals)
+
+            # Masks should be saved to disk
+            mask_dir = os.path.join(output_dir, "masks")
+            mask_files = [f for f in os.listdir(mask_dir) if f.endswith(".tiff")]
+            assert len(mask_files) == len(frame_signals)
+
             assert len(finished_signals) == 1
+
+    def test_correction_stop_during_propagation(self, qapp, tmp_image_dir):
+        """Stop button should halt correction propagation via stop_check."""
+        from controllers.processing_controller import CorrectionWorker
+
+        mg = MagicMock()
+        mg.is_initialized = True
+
+        # Mock propagate_from that checks stop_check on each frame
+        call_count = 0
+        def fake_propagate_from(start_frame_idx=0, threshold=0.0,
+                                progress_callback=None, frame_callback=None,
+                                stop_check=None):
+            nonlocal call_count
+            for i in range(start_frame_idx, start_frame_idx + 10):
+                if stop_check and stop_check():
+                    break
+                mask = np.zeros((50, 50), dtype=np.uint8)
+                if frame_callback:
+                    frame_callback(i, mask)
+                call_count += 1
+            return {}
+
+        mg.propagate_from = MagicMock(side_effect=fake_propagate_from)
+        mg.add_correction = MagicMock()
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            converted_dir = os.path.join(output_dir, "converted_jpeg")
+            os.makedirs(converted_dir, exist_ok=True)
+            for i in range(len(image_files)):
+                dummy = np.zeros((50, 50, 3), dtype=np.uint8)
+                cv2.imwrite(os.path.join(converted_dir, f"{i:06d}.jpg"), dummy)
+
+            worker = CorrectionWorker(
+                mask_generator=mg,
+                frame_idx=0,
+                points=[[10.0, 20.0]],
+                labels=[1],
+                threshold=0.0,
+                image_files=image_files,
+                output_dir=output_dir,
+                intermediate_format="JPEG (fast)",
+            )
+
+            # Stop immediately — should process 0 frames in propagation
+            worker.stop()
+            worker.run()
+
+            # propagate_from should still be called, but stop_check halts it
+            # call_count should be 0 since stop was set before propagation
+            assert call_count == 0
+
+    def test_correction_scales_points(self, qapp, tmp_image_dir):
+        """Correction should scale points when images are downsampled."""
+        from controllers.processing_controller import CorrectionWorker
+
+        mg = MagicMock()
+        mg.is_initialized = True
+        mg.add_correction = MagicMock()
+        mg.propagate_from = MagicMock(return_value={})
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            # Create converted images at half size (25x25 vs 50x50 originals)
+            converted_dir = os.path.join(output_dir, "converted_jpeg")
+            os.makedirs(converted_dir, exist_ok=True)
+            for i in range(len(image_files)):
+                dummy = np.zeros((25, 25, 3), dtype=np.uint8)
+                cv2.imwrite(os.path.join(converted_dir, f"{i:06d}.jpg"), dummy)
+
+            worker = CorrectionWorker(
+                mask_generator=mg,
+                frame_idx=0,
+                points=[[40.0, 30.0]],  # original coords
+                labels=[1],
+                threshold=0.0,
+                image_files=image_files,
+                output_dir=output_dir,
+                intermediate_format="JPEG (fast)",
+            )
+
+            worker.run()
+
+            # Check that add_correction was called with scaled points
+            call_args = mg.add_correction.call_args
+            scaled_points = call_args[0][1]  # second positional arg
+            # scale_x = 25/50 = 0.5, scale_y = 25/50 = 0.5
+            np.testing.assert_allclose(scaled_points[0, 0], 20.0, atol=0.1)
+            np.testing.assert_allclose(scaled_points[0, 1], 15.0, atol=0.1)
 
     def test_correction_copies_data(self, qapp, mock_mask_generator):
         """Correction worker should copy points/labels at construction."""
@@ -442,6 +570,7 @@ class TestCorrectionWorker:
             threshold=0.0,
             image_files=files,
             output_dir="/tmp/out",
+            intermediate_format="JPEG (fast)",
         )
 
         points.append([99.0, 99.0])
@@ -871,7 +1000,7 @@ class TestProcessingIntegration:
             converted_dir = os.path.join(output_dir, "converted_jpeg")
             os.makedirs(converted_dir, exist_ok=True)
             for i in range(len(image_files)):
-                dummy_path = os.path.join(converted_dir, f"frame_{i:06d}.jpg")
+                dummy_path = os.path.join(converted_dir, f"{i:06d}.jpg")
                 cv2.imwrite(
                     dummy_path,
                     np.zeros((10, 10, 3), dtype=np.uint8),

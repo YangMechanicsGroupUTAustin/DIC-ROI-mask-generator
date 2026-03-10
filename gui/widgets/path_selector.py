@@ -1,7 +1,10 @@
 """Directory path selector with label and Browse button.
 
 Used for selecting input/output directories.
+Supports both Browse button selection and direct path pasting/typing.
 """
+
+import os
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -50,7 +53,7 @@ class PathSelector(QWidget):
 
         self._line_edit = QLineEdit()
         self._line_edit.setPlaceholderText(placeholder)
-        self._line_edit.setReadOnly(True)
+        self._line_edit.editingFinished.connect(self._on_editing_finished)
         input_row.addWidget(self._line_edit)
 
         browse_btn = QPushButton()
@@ -70,6 +73,12 @@ class PathSelector(QWidget):
         """Set the path programmatically."""
         self._line_edit.setText(path)
         self.path_changed.emit(path)
+
+    def _on_editing_finished(self) -> None:
+        """Validate and emit path when user finishes editing (Enter or focus lost)."""
+        path = self._line_edit.text().strip().strip('"')
+        if path and os.path.isdir(path):
+            self.path_changed.emit(path)
 
     def _browse(self) -> None:
         directory = QFileDialog.getExistingDirectory(

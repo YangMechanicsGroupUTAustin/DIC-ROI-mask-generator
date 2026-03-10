@@ -11,6 +11,7 @@ from typing import Optional
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
+from core.image_processing import imread_safe, imwrite_safe
 from core.spatial_smoothing import perona_malik_smooth
 from core.temporal_smoothing import temporal_smooth_sequence
 from core.image_processing import get_image_files
@@ -74,7 +75,7 @@ class SpatialSmoothWorker(QThread):
                 logger.info("Spatial smoothing cancelled")
                 return
 
-            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            mask = imread_safe(mask_path, cv2.IMREAD_GRAYSCALE)
             if mask is None:
                 logger.warning(f"Could not read mask: {mask_path}")
                 continue
@@ -90,14 +91,13 @@ class SpatialSmoothWorker(QThread):
 
             out_name = os.path.basename(mask_path)
             out_path = os.path.join(self._output_dir, out_name)
-            cv2.imwrite(out_path, smoothed)
+            imwrite_safe(out_path, smoothed)
 
             self.progress.emit(i + 1, total)
 
         logger.info(
             f"Spatial smoothing complete: {total} masks -> {self._output_dir}"
         )
-        self.finished.emit(self._output_dir)
 
 
 class TemporalSmoothWorker(QThread):
@@ -151,7 +151,7 @@ class TemporalSmoothWorker(QThread):
         for i, path in enumerate(mask_files):
             if self._stop_event.is_set():
                 return
-            mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            mask = imread_safe(path, cv2.IMREAD_GRAYSCALE)
             if mask is None:
                 logger.warning(f"Could not read mask: {path}, using zeros")
                 if frames:
@@ -178,13 +178,12 @@ class TemporalSmoothWorker(QThread):
                 return
             out_name = os.path.basename(mask_files[i])
             out_path = os.path.join(self._output_dir, out_name)
-            cv2.imwrite(out_path, smoothed)
+            imwrite_safe(out_path, smoothed)
 
         logger.info(
             f"Temporal smoothing complete: "
             f"{len(smoothed_frames)} masks -> {self._output_dir}"
         )
-        self.finished.emit(self._output_dir)
 
 
 class SmoothingController(QObject):

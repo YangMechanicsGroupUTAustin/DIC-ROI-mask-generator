@@ -344,6 +344,16 @@ class CanvasPanel(QWidget):
                 ).copy()
 
         pixmap = QPixmap.fromImage(qimg)
+
+        # Save view state before modifying the scene so we can restore it
+        # and prevent zoom/pan jumps when the image is replaced while
+        # annotation points are present (e.g. during processing or preview).
+        preserve_view = self._has_image and bool(self._annotation_items)
+        if preserve_view:
+            saved_transform = self._view.transform()
+            saved_hval = self._view.horizontalScrollBar().value()
+            saved_vval = self._view.verticalScrollBar().value()
+
         self._pixmap_item.setPixmap(pixmap)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
 
@@ -355,7 +365,12 @@ class CanvasPanel(QWidget):
         self._view.setVisible(True)
         self._placeholder.setVisible(False)
 
-        if not self._annotation_items:
+        if preserve_view:
+            # Restore the user's zoom/pan position unchanged
+            self._view.setTransform(saved_transform)
+            self._view.horizontalScrollBar().setValue(saved_hval)
+            self._view.verticalScrollBar().setValue(saved_vval)
+        elif not self._annotation_items:
             self._view.fit_to_view()
 
     def set_points(

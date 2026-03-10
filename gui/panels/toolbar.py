@@ -140,12 +140,15 @@ class Toolbar(QWidget):
         self._select_btn = ToolButton(
             "cursor", "Select", "V", checkable=True
         )
+        self._select_btn.setToolTip("Select / Move Points [V]\nDrag annotation points to reposition them")
         self._draw_btn = ToolButton(
             "pencil", "Draw Points", "D", checkable=True
         )
+        self._draw_btn.setToolTip("Draw Points [D]\nClick on image to add annotation points")
         self._erase_btn = ToolButton(
             "eraser", "Erase", "E", checkable=True
         )
+        self._erase_btn.setToolTip("Erase Points [E]\nClick on a point to remove it")
 
         self._tool_group.addButton(self._select_btn, 0)
         self._tool_group.addButton(self._draw_btn, 1)
@@ -179,12 +182,20 @@ class Toolbar(QWidget):
             active_text=Colors.SUCCESS,
             active_border=Colors.SUCCESS_BORDER,
         )
+        self._fg_btn.setToolTip(
+            "Foreground Mode [Space to toggle]\n"
+            "Next point marks area to INCLUDE in mask"
+        )
         self._bg_btn = _ModeButton(
             "Background",
             dot_color=Colors.ROSE,
             active_bg=Colors.ROSE_BG,
             active_text=Colors.ROSE,
             active_border=Colors.ROSE_BORDER,
+        )
+        self._bg_btn.setToolTip(
+            "Background Mode [Space to toggle]\n"
+            "Next point marks area to EXCLUDE from mask"
         )
 
         self._mode_group.addButton(self._fg_btn, 0)
@@ -203,14 +214,17 @@ class Toolbar(QWidget):
 
         # --- Actions: Clear | Undo | Redo ---
         self._clear_btn = ToolButton("trash", "Clear", variant="danger")
+        self._clear_btn.setToolTip("Clear All Points\nRemove all annotation points from the image")
         self._clear_btn.clicked.connect(self.clear_requested.emit)
         layout.addWidget(self._clear_btn)
 
         self._undo_btn = ToolButton("undo", "Undo", "Ctrl+Z")
+        self._undo_btn.setToolTip("Undo [Ctrl+Z]\nUndo last annotation action")
         self._undo_btn.clicked.connect(self.undo_requested.emit)
         layout.addWidget(self._undo_btn)
 
         self._redo_btn = ToolButton("redo", "Redo", "Ctrl+Y")
+        self._redo_btn.setToolTip("Redo [Ctrl+Y]\nRedo last undone action")
         self._redo_btn.clicked.connect(self.redo_requested.emit)
         layout.addWidget(self._redo_btn)
 
@@ -219,10 +233,20 @@ class Toolbar(QWidget):
 
         # --- File ops: Save | Load ---
         self._save_btn = ToolButton("save", "Save", "Ctrl+S")
+        self._save_btn.setToolTip(
+            "Save Config [Ctrl+S]\n"
+            "Save annotation points and settings to a JSON file\n"
+            "for later reuse"
+        )
         self._save_btn.clicked.connect(self.save_requested.emit)
         layout.addWidget(self._save_btn)
 
         self._load_btn = ToolButton("upload", "Load", "Ctrl+O")
+        self._load_btn.setToolTip(
+            "Load Config [Ctrl+O]\n"
+            "Load previously saved annotation points and settings\n"
+            "from a JSON file"
+        )
         self._load_btn.clicked.connect(self.load_requested.emit)
         layout.addWidget(self._load_btn)
 
@@ -231,7 +255,14 @@ class Toolbar(QWidget):
 
         # --- Processing controls ---
         self._add_correction_btn = ToolButton(
-            "plus-circle", "Add Correction"
+            "plus-circle", "Correct Mask"
+        )
+        self._add_correction_btn.setToolTip(
+            "Correct Mask\n"
+            "After processing, navigate to a frame where the mask\n"
+            "is inaccurate, then click this to enter correction mode.\n"
+            "Add new foreground/background points to fix the mask,\n"
+            "then click 'Apply & Re-propagate'."
         )
         self._add_correction_btn.clicked.connect(
             self.add_correction_requested.emit
@@ -239,7 +270,13 @@ class Toolbar(QWidget):
         layout.addWidget(self._add_correction_btn)
 
         self._apply_correction_btn = ToolButton(
-            "check-circle", "Apply Correction", variant="success"
+            "check-circle", "Apply & Re-propagate", variant="success"
+        )
+        self._apply_correction_btn.setToolTip(
+            "Apply & Re-propagate\n"
+            "Apply correction points and re-generate masks\n"
+            "from the current frame forward through all\n"
+            "remaining frames."
         )
         self._apply_correction_btn.clicked.connect(
             self.apply_correction_requested.emit
@@ -247,7 +284,13 @@ class Toolbar(QWidget):
         layout.addWidget(self._apply_correction_btn)
 
         # Force re-process checkbox
-        self._force_reprocess = QCheckBox("Force Re-process")
+        self._force_reprocess = QCheckBox("Force Re-convert")
+        self._force_reprocess.setToolTip(
+            "Force Re-convert Images\n"
+            "When checked, re-converts all source images to the\n"
+            "intermediate format even if converted files already\n"
+            "exist. Only needed if source images have changed."
+        )
         self._force_reprocess.toggled.connect(self.force_reprocess_changed.emit)
         layout.addWidget(self._force_reprocess)
 
@@ -261,6 +304,13 @@ class Toolbar(QWidget):
         self._start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._start_btn.setMinimumWidth(140)
         self._start_btn.setMinimumHeight(36)
+        self._start_btn.setToolTip(
+            "Start Processing [Ctrl+Enter]\n"
+            "Convert images, load model, and propagate masks\n"
+            "through all frames using your annotation points.\n"
+            "Previously converted images and loaded models\n"
+            "are reused automatically."
+        )
         self._start_btn.clicked.connect(self.start_processing_requested.emit)
         layout.addWidget(self._start_btn)
 
@@ -270,6 +320,11 @@ class Toolbar(QWidget):
         self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_btn.setMinimumWidth(80)
         self._stop_btn.setMinimumHeight(36)
+        self._stop_btn.setToolTip(
+            "Stop Processing [Escape]\n"
+            "Stop the current operation. Masks already saved\n"
+            "will be kept. You can restart processing later."
+        )
         self._stop_btn.setStyleSheet(
             f"QPushButton {{ background: {Colors.DANGER}; color: white; "
             f"border-radius: 8px; padding: 6px 16px; "
