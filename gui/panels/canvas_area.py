@@ -90,6 +90,7 @@ class CanvasArea(QWidget):
         zoom_out_btn.setFixedSize(28, 28)
         zoom_out_btn.setFlat(True)
         zoom_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        zoom_out_btn.setToolTip("Zoom out (or scroll down)")
         zoom_out_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
@@ -113,6 +114,7 @@ class CanvasArea(QWidget):
         zoom_in_btn.setFixedSize(28, 28)
         zoom_in_btn.setFlat(True)
         zoom_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        zoom_in_btn.setToolTip("Zoom in (or scroll up)")
         zoom_in_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
@@ -128,6 +130,7 @@ class CanvasArea(QWidget):
         reset_btn.setFixedSize(28, 28)
         reset_btn.setFlat(True)
         reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.setToolTip("Fit to window [Ctrl+1]")
         reset_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
@@ -141,6 +144,7 @@ class CanvasArea(QWidget):
         grid_btn.setFixedSize(28, 28)
         grid_btn.setFlat(True)
         grid_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        grid_btn.setToolTip("Toggle grid overlay")
         grid_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
