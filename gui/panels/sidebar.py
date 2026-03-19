@@ -1025,13 +1025,13 @@ class Sidebar(QWidget):
         """Whether auto-export overlay images is checked."""
         return self._export_overlay_check.isChecked()
 
-    def set_input_path(self, path: str) -> None:
+    def set_input_path(self, path: str, emit_signal: bool = True) -> None:
         """Set input directory path."""
-        self._input_path.set_path(path)
+        self._input_path.set_path(path, emit_signal=emit_signal)
 
-    def set_output_path(self, path: str) -> None:
+    def set_output_path(self, path: str, emit_signal: bool = True) -> None:
         """Set output directory path."""
-        self._output_path.set_path(path)
+        self._output_path.set_path(path, emit_signal=emit_signal)
 
     def get_preprocessing_config(self):
         """Build PreprocessingConfig from current sidebar values."""

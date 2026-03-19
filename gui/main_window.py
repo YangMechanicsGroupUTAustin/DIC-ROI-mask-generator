@@ -448,18 +448,21 @@ class MainWindow(QMainWindow):
                 )
 
     def _restore_settings(self) -> None:
-        """Restore paths from previous session."""
+        """Restore path display from previous session.
+
+        Only populates the sidebar path fields for convenience —
+        does NOT load images or change application state.  The user
+        must explicitly click Browse or press Enter to load.
+        """
         if self._state is None:
             return
         settings = self._get_settings()
         last_input = settings.value("paths/last_input", "")
         last_output = settings.value("paths/last_output", "")
         if last_input and os.path.isdir(last_input):
-            self._sidebar.set_input_path(last_input)
-            self._state.set_input_dir(last_input)
+            self._sidebar.set_input_path(last_input, emit_signal=False)
         if last_output:
-            self._sidebar.set_output_path(last_output)
-            self._state.set_output_dir(last_output)
+            self._sidebar.set_output_path(last_output, emit_signal=False)
 
     def _build_recent_menu(self) -> None:
         """Rebuild the 'Recent Projects' submenu."""
