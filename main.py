@@ -4,6 +4,7 @@ Creates all controllers, configures device detection and VRAM monitoring,
 then launches the main window with full signal wiring.
 """
 
+import atexit
 import sys
 import os
 import logging
@@ -16,7 +17,9 @@ from PyQt6.QtWidgets import QApplication
 
 from controllers.app_state import AppState
 from controllers.annotation_controller import AnnotationController
+from controllers.preview_controller import PreviewController
 from controllers.processing_controller import ProcessingController
+from controllers.shape_controller import ShapeController
 from controllers.smoothing_controller import SmoothingController
 from core.mask_generator import MaskGenerator
 from gui.main_window import MainWindow
@@ -101,6 +104,11 @@ def main():
     annotation_controller = AnnotationController(state)
     processing_controller = ProcessingController(state, mask_generator)
     smoothing_controller = SmoothingController()
+    shape_controller = ShapeController()
+    preview_controller = PreviewController(state, shape_controller)
+
+    # Ensure GPU memory is released on exit
+    atexit.register(mask_generator.cleanup)
 
     # --- Create main window with controllers ---
     window = MainWindow(
@@ -108,6 +116,8 @@ def main():
         annotation_controller=annotation_controller,
         processing_controller=processing_controller,
         smoothing_controller=smoothing_controller,
+        shape_controller=shape_controller,
+        preview_controller=preview_controller,
     )
 
     # --- Device detection and VRAM monitoring ---
@@ -126,6 +136,12 @@ def main():
         pass
 
     window.show()
+
+    # Show welcome dialog for first-time users
+    from gui.dialogs.welcome_dialog import should_show_welcome, WelcomeDialog
+    if should_show_welcome():
+        welcome = WelcomeDialog(window)
+        welcome.exec()
 
     logger.info("SAM2 Studio ready")
     sys.exit(app.exec())

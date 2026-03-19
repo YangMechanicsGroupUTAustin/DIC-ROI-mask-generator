@@ -25,8 +25,19 @@ def save_annotation_config(
     correction_points: list | None = None,
     smoothing_spatial: dict | None = None,
     smoothing_temporal: dict | None = None,
+    shapes: list | None = None,
 ) -> None:
     """Save annotation points and experiment config to JSON file (v2)."""
+    # Serialize ShapeOverlay objects to plain dicts
+    shape_dicts = []
+    if shapes:
+        for s in shapes:
+            shape_dicts.append({
+                "mode": s.mode,
+                "shape_type": s.shape_type,
+                "points": s.points,
+            })
+
     config = {
         "version": CURRENT_VERSION,
         "saved_at": datetime.now().isoformat(),
@@ -51,6 +62,7 @@ def save_annotation_config(
                 "sigma": 2.0, "neighbors": 2
             },
         },
+        "shapes": shape_dicts,
     }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
@@ -81,5 +93,24 @@ def load_annotation_config(filepath: str) -> dict:
             "temporal": {"sigma": 2.0, "neighbors": 2},
         })
         config["version"] = CURRENT_VERSION
+
+    # Ensure shapes key exists (added in v2.1)
+    config.setdefault("shapes", [])
+
+    # Convert shape dicts to tuples for points (JSON arrays → tuples)
+    normalized_shapes = []
+    for s in config["shapes"]:
+        pts = s.get("points", ())
+        # Convert nested lists to tuple of tuples for polygon
+        if isinstance(pts, list) and pts and isinstance(pts[0], list):
+            pts = tuple(tuple(p) for p in pts)
+        elif isinstance(pts, list):
+            pts = tuple(pts)
+        normalized_shapes.append({
+            "mode": s["mode"],
+            "shape_type": s["shape_type"],
+            "points": pts,
+        })
+    config["shapes"] = normalized_shapes
 
     return config
