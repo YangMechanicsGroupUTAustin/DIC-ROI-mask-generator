@@ -69,10 +69,17 @@ class PathSelector(QWidget):
         """Return the current path."""
         return self._line_edit.text()
 
-    def set_path(self, path: str) -> None:
-        """Set the path programmatically."""
+    def set_path(self, path: str, emit_signal: bool = True) -> None:
+        """Set the path programmatically.
+
+        Args:
+            path: Directory path to set.
+            emit_signal: If False, only update the display text
+                without emitting path_changed (used during settings restore).
+        """
         self._line_edit.setText(path)
-        self.path_changed.emit(path)
+        if emit_signal:
+            self.path_changed.emit(path)
 
     def _on_editing_finished(self) -> None:
         """Validate and emit path when user finishes editing (Enter or focus lost)."""
