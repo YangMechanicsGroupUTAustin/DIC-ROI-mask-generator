@@ -20,6 +20,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsEllipseItem,
+    QGraphicsItem,
+    QGraphicsLineItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
@@ -305,6 +307,9 @@ class CanvasPanel(QWidget):
     shape_confirmed = pyqtSignal(str, str, tuple)  # mode, shape_type, points
     shape_drawing_cancelled = pyqtSignal()
 
+    # Maximize/restore signal
+    maximize_toggled = pyqtSignal(object)  # self (the panel requesting toggle)
+
     def __init__(
         self,
         title: str,
@@ -379,17 +384,18 @@ class CanvasPanel(QWidget):
         header_layout.addWidget(self._eye_btn)
 
         # Maximize button
-        max_btn = QPushButton()
-        max_btn.setIcon(get_icon("maximize", Colors.TEXT_DIM, 14))
-        max_btn.setFixedSize(24, 24)
-        max_btn.setFlat(True)
-        max_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        max_btn.setToolTip("Maximize this panel")
-        max_btn.setStyleSheet(
+        self._max_btn = QPushButton()
+        self._max_btn.setIcon(get_icon("maximize", Colors.TEXT_DIM, 14))
+        self._max_btn.setFixedSize(24, 24)
+        self._max_btn.setFlat(True)
+        self._max_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._max_btn.setToolTip("Maximize this panel")
+        self._max_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); border-radius: 4px; }"
         )
-        header_layout.addWidget(max_btn)
+        self._max_btn.clicked.connect(self._toggle_maximize)
+        header_layout.addWidget(self._max_btn)
 
         main_layout.addWidget(header)
 
@@ -428,6 +434,9 @@ class CanvasPanel(QWidget):
             self._shape_controller.drawing_cancelled.connect(
                 self.shape_drawing_cancelled.emit
             )
+
+        self._grid_items: list[QGraphicsItem] = []
+        self._grid_visible = False
 
         self._content_layout.addWidget(self._view)
 
@@ -648,13 +657,60 @@ class CanvasPanel(QWidget):
         self._annotation_items.clear()
 
     def _toggle_visibility(self) -> None:
-        """Toggle overlay visibility."""
+        """Toggle image visibility (show/hide the canvas content)."""
         self._show_overlay = not self._show_overlay
         icon_name = "eye" if self._show_overlay else "eye-off"
         self._eye_btn.setIcon(get_icon(icon_name, Colors.TEXT_DIM, 14))
-        # Toggle annotation visibility
+        # Toggle the image and all annotation items
+        self._pixmap_item.setVisible(self._show_overlay)
         for item in self._annotation_items:
             item.setVisible(self._show_overlay)
+
+    def _toggle_maximize(self) -> None:
+        """Request maximize/restore from parent CanvasArea."""
+        self.maximize_toggled.emit(self)
+
+    def set_grid_visible(self, visible: bool) -> None:
+        """Show or hide a grid overlay on the image."""
+        if visible == self._grid_visible:
+            return
+        self._grid_visible = visible
+        if visible:
+            self._draw_grid()
+        else:
+            self._clear_grid()
+
+    def _draw_grid(self) -> None:
+        """Draw a grid overlay on the current image."""
+        self._clear_grid()
+        pixmap = self._pixmap_item.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        w, h = pixmap.width(), pixmap.height()
+        pen = QPen(QColor(255, 255, 255, 60))
+        pen.setCosmetic(True)  # constant screen width regardless of zoom
+        pen.setWidth(1)
+        # ~8x8 grid lines
+        step_x = max(w // 8, 1)
+        step_y = max(h // 8, 1)
+        for x in range(step_x, w, step_x):
+            line = QGraphicsLineItem(x, 0, x, h)
+            line.setPen(pen)
+            line.setZValue(5)
+            self._scene.addItem(line)
+            self._grid_items.append(line)
+        for y in range(step_y, h, step_y):
+            line = QGraphicsLineItem(0, y, w, y)
+            line.setPen(pen)
+            line.setZValue(5)
+            self._scene.addItem(line)
+            self._grid_items.append(line)
+
+    def _clear_grid(self) -> None:
+        """Remove all grid overlay items."""
+        for item in self._grid_items:
+            self._scene.removeItem(item)
+        self._grid_items.clear()
 
     def _on_point_clicked(self, x: float, y: float) -> None:
         """Handle click on canvas when draw tool is active."""

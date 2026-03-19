@@ -144,6 +144,12 @@ _ICONS: dict[str, str] = {
         '<line x1="21" x2="14" y1="3" y2="10"/>'
         '<line x1="3" x2="10" y1="21" y2="14"/>'
     ),
+    "minimize": (
+        '<polyline points="4 14 10 14 10 20"/>'
+        '<polyline points="20 10 14 10 14 4"/>'
+        '<line x1="14" x2="21" y1="10" y2="3"/>'
+        '<line x1="3" x2="10" y1="21" y2="14"/>'
+    ),
     "zoom-in": (
         '<circle cx="11" cy="11" r="8"/>'
         '<line x1="21" x2="16.65" y1="21" y2="16.65"/>'

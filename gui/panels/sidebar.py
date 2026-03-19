@@ -116,6 +116,7 @@ class Sidebar(QWidget):
     spatial_smooth_requested = pyqtSignal(dict)
     temporal_smooth_requested = pyqtSignal(dict)
     refresh_stats_requested = pyqtSignal()
+    mask_view_changed = pyqtSignal(str)  # subdir name: "masks", "mask_spatial_smoothing", etc.
     panel_switched = pyqtSignal(str)  # "processing" or "postprocessing"
 
     def __init__(self, parent: QWidget | None = None):
@@ -766,6 +767,22 @@ class Sidebar(QWidget):
         pp_scroll_layout.setContentsMargins(8, 8, 8, 8)
         pp_scroll_layout.setSpacing(8)
 
+        # --- Mask View Selector ---
+        self._mask_view_select = SelectField(
+            "Viewing Masks From",
+            options=["Original (masks/)"],
+            default="Original (masks/)",
+            tooltip=(
+                "Switch between viewing original SAM2 masks,\n"
+                "spatially smoothed masks, or temporally smoothed masks.\n"
+                "New options appear after you apply smoothing."
+            ),
+        )
+        self._mask_view_select.value_changed.connect(
+            self._on_mask_view_changed
+        )
+        pp_scroll_layout.addWidget(self._mask_view_select)
+
         # --- Spatial Smoothing section ---
         spatial_section = CollapsibleSection(
             "Spatial Smoothing", icon_name="waves", default_open=True
@@ -833,6 +850,18 @@ class Sidebar(QWidget):
         temporal_section = CollapsibleSection(
             "Temporal Smoothing", icon_name="sliders", default_open=True
         )
+
+        # Input source indicator
+        self._temporal_source_label = QLabel("Input: masks/")
+        self._temporal_source_label.setStyleSheet(
+            f"color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent; padding: 2px 0; font-style: italic;"
+        )
+        self._temporal_source_label.setToolTip(
+            "Shows which mask directory temporal smoothing will read from.\n"
+            "If spatial smoothing results exist, temporal will chain from them."
+        )
+        temporal_section.add_widget(self._temporal_source_label)
 
         # 2-column grid: Var Threshold + Neighbors
         temporal_grid = QWidget()
@@ -1374,3 +1403,31 @@ class Sidebar(QWidget):
             "replace_originals": self._temporal_replace_check.isChecked(),
         }
         self.temporal_smooth_requested.emit(params)
+
+    def _on_mask_view_changed(self, label: str) -> None:
+        """Emit the mask subdirectory corresponding to the selected view."""
+        subdir = self._MASK_VIEW_MAP.get(label, "masks")
+        self.mask_view_changed.emit(subdir)
+
+    # Map display labels → directory names
+    _MASK_VIEW_MAP = {
+        "Original (masks/)": "masks",
+        "Spatial Smoothed": "mask_spatial_smoothing",
+        "Temporal Smoothed": "mask_temporal_smoothing",
+    }
+
+    def add_mask_view_option(self, label: str) -> None:
+        """Add a new option to the mask view selector if not already present."""
+        current_items = self._mask_view_select.options()
+        if label not in current_items:
+            self._mask_view_select.add_option(label)
+
+    def set_mask_view(self, label: str) -> None:
+        """Programmatically set the active mask view (no signal emitted)."""
+        self._mask_view_select.blockSignals(True)
+        self._mask_view_select.set_value(label)
+        self._mask_view_select.blockSignals(False)
+
+    def update_temporal_source_label(self, source_dir: str) -> None:
+        """Update the temporal smoothing input source indicator."""
+        self._temporal_source_label.setText(f"Input: {source_dir}")

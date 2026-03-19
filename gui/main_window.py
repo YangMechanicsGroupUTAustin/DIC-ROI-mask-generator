@@ -715,6 +715,12 @@ class MainWindow(QMainWindow):
             self._sidebar.refresh_stats_requested.connect(
                 self._on_refresh_stats
             )
+            self._sidebar.mask_view_changed.connect(
+                self._on_mask_view_changed
+            )
+            self._sidebar.panel_switched.connect(
+                self._on_sidebar_panel_switched
+            )
 
         # --- Toolbar signals ---
         self._toolbar.tool_changed.connect(self._canvas_area.set_active_tool)
@@ -849,26 +855,14 @@ class MainWindow(QMainWindow):
             self._toggle_point_mode
         )
 
-        # Undo / Redo
-        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(
-            self._shortcut_undo
-        )
-        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(
-            self._shortcut_redo
-        )
+        # Ctrl+Shift+Z as alternative redo (Ctrl+Z and Ctrl+Y are
+        # already registered via menu bar QActions — duplicating them
+        # here would create ambiguous shortcuts and neither would fire).
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self).activated.connect(
             self._shortcut_redo
         )
 
-        # Save / Load config
-        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(
-            self._on_save_config
-        )
-        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(
-            self._on_load_config
-        )
-
-        # Frame navigation
+        # Frame navigation (no menu equivalents)
         QShortcut(QKeySequence("Left"), self).activated.connect(
             self._frame_navigator._prev_frame
         )
@@ -882,17 +876,12 @@ class MainWindow(QMainWindow):
             self._go_to_last_frame
         )
 
-        # Processing
+        # Processing (no menu equivalents)
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(
             self._on_start_processing
         )
         QShortcut(QKeySequence("Escape"), self).activated.connect(
             self._shortcut_escape
-        )
-
-        # Jump to frame
-        QShortcut(QKeySequence("Ctrl+G"), self).activated.connect(
-            self._show_jump_to_frame
         )
 
         # Mark frame
@@ -901,9 +890,17 @@ class MainWindow(QMainWindow):
         )
 
     def _activate_tool(self, tool: str) -> None:
-        """Activate a tool via shortcut: update toolbar and canvas."""
+        """Activate a tool via shortcut: update toolbar and canvas.
+
+        Also transfers keyboard focus to the canvas so the very first
+        click registers immediately (avoids the "first click lost to
+        focus transfer" issue common with QGraphicsView).
+        """
         self._toolbar.set_tool(tool)
         self._canvas_area.set_active_tool(tool)
+        # Ensure the interactive canvas view has focus so mouse events
+        # are processed without needing a focus-acquiring click first.
+        self._canvas_area._original._view.setFocus()
 
     def _toggle_point_mode(self) -> None:
         """Toggle between foreground and background point mode."""
@@ -1691,7 +1688,12 @@ class MainWindow(QMainWindow):
         )
 
     def _on_temporal_smooth(self, params: dict) -> None:
-        """Start temporal smoothing with parameters from the sidebar."""
+        """Start temporal smoothing with parameters from the sidebar.
+
+        Smart chaining: if spatial smoothing results exist, temporal
+        reads from ``mask_spatial_smoothing/`` to chain naturally.
+        Otherwise it reads from ``masks/``.
+        """
         if self._smoothing is None or self._state is None:
             return
 
@@ -1703,11 +1705,17 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Smart source selection: prefer spatial smoothed if available
+        spatial_dir = os.path.join(output_dir, "mask_spatial_smoothing")
         masks_dir = os.path.join(output_dir, "masks")
-        if not os.path.isdir(masks_dir):
+        if os.path.isdir(spatial_dir) and os.listdir(spatial_dir):
+            input_dir = spatial_dir
+        elif os.path.isdir(masks_dir):
+            input_dir = masks_dir
+        else:
             self._show_error(
                 "Cannot Smooth",
-                f"Masks directory not found: {masks_dir}\n"
+                f"No mask directory found in:\n{output_dir}\n"
                 "Run processing first.",
             )
             return
@@ -1721,7 +1729,7 @@ class MainWindow(QMainWindow):
         self._smoothing_start_time = time.monotonic()
         self._state.set_state(self._state.State.POST_PROCESSING)
         self._smoothing.start_temporal(
-            input_dir=masks_dir,
+            input_dir=input_dir,
             output_dir=smooth_output,
             sigma=params.get("sigma", 2.0),
             num_neighbors=params.get("neighbors", 2),
@@ -1759,6 +1767,7 @@ class MainWindow(QMainWindow):
 
         Switches the active mask display directory to the smoothed
         output so the user can immediately see the results.
+        Also updates the Mask View selector with available options.
         """
         self._state.set_state(self._state.State.REVIEWING)
 
@@ -1774,6 +1783,14 @@ class MainWindow(QMainWindow):
             # Replace-in-place mode → still "masks"
             self._active_mask_subdir = "masks"
 
+        # Update the mask view selector in sidebar
+        view_label = self._mask_subdir_to_label(self._active_mask_subdir)
+        self._sidebar.add_mask_view_option(view_label)
+        self._sidebar.set_mask_view(view_label)
+
+        # Update temporal source indicator
+        self._update_temporal_source_label()
+
         dir_name = os.path.basename(output_dir)
         self._status_bar.set_status(
             f"Smoothing complete — viewing: {dir_name}", "ready",
@@ -1785,7 +1802,43 @@ class MainWindow(QMainWindow):
     def _on_smoothing_error(self, error_msg: str) -> None:
         """Handle smoothing error."""
         self._state.set_state(self._state.State.REVIEWING)
+        self._status_bar.hide_processing_progress()
         self._show_error("Smoothing Error", error_msg)
+
+    def _on_mask_view_changed(self, subdir: str) -> None:
+        """Switch display to a different mask directory."""
+        self._active_mask_subdir = subdir
+        self._load_current_frame()
+
+    @staticmethod
+    def _mask_subdir_to_label(subdir: str) -> str:
+        """Convert mask subdir name to a human-readable label."""
+        mapping = {
+            "masks": "Original (masks/)",
+            "mask_spatial_smoothing": "Spatial Smoothed",
+            "mask_temporal_smoothing": "Temporal Smoothed",
+        }
+        return mapping.get(subdir, subdir)
+
+    def _update_temporal_source_label(self) -> None:
+        """Update the temporal smoothing input source label in sidebar."""
+        if self._state is None or not self._state.output_dir:
+            self._sidebar.update_temporal_source_label("masks/")
+            return
+        spatial_dir = os.path.join(
+            self._state.output_dir, "mask_spatial_smoothing",
+        )
+        if os.path.isdir(spatial_dir) and os.listdir(spatial_dir):
+            self._sidebar.update_temporal_source_label(
+                "mask_spatial_smoothing/ (chained)"
+            )
+        else:
+            self._sidebar.update_temporal_source_label("masks/")
+
+    def _on_sidebar_panel_switched(self, panel: str) -> None:
+        """Refresh dynamic labels when user switches sidebar tabs."""
+        if panel == "postprocessing":
+            self._update_temporal_source_label()
 
     def _on_refresh_stats(self) -> None:
         """Compute and display mask statistics."""
@@ -1920,6 +1973,7 @@ class MainWindow(QMainWindow):
         Searches the active mask directory (defaults to ``masks/``,
         switches to smoothed output dir after smoothing).
         Supports both ``.tiff`` and ``.png`` extensions.
+        Clears the mask/overlay panels if no mask is found.
         """
         if self._state is None or not self._state.output_dir:
             return
@@ -1937,6 +1991,10 @@ class MainWindow(QMainWindow):
                 break
 
         if mask_path is None:
+            # Clear stale mask/overlay so the display doesn't show
+            # leftover data from a previously viewed frame or directory.
+            self._canvas_area._mask.clear_image()
+            self._canvas_area._overlay.clear_image()
             return
 
         try:
@@ -1951,6 +2009,9 @@ class MainWindow(QMainWindow):
                     color=self._state.overlay_color,
                 )
                 self._state.set_display_images(mask=mask, overlay=overlay)
+            else:
+                self._canvas_area._mask.clear_image()
+                self._canvas_area._overlay.clear_image()
         except Exception as e:
             logger.warning(f"Could not load mask for frame {frame_idx}: {e}")
 
