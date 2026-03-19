@@ -57,6 +57,9 @@ class FrameNavigator(QWidget):
     frame_changed = pyqtSignal(int)        # 1-based
     start_frame_changed = pyqtSignal(int)
     end_frame_changed = pyqtSignal(int)
+    mark_frame_toggled = pyqtSignal(int)   # toggle bookmark on frame
+    jump_to_prev_mark = pyqtSignal()
+    jump_to_next_mark = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -168,6 +171,62 @@ class FrameNavigator(QWidget):
         self._slider.valueChanged.connect(self._on_slider_changed)
         layout.addWidget(self._slider, 1)
 
+        # Divider
+        layout.addWidget(_create_divider())
+
+        # --- Bookmark controls ---
+        # Previous marked frame
+        prev_mark_btn = QPushButton()
+        prev_mark_btn.setIcon(get_icon("skip-back", Colors.TEXT_DIM, 14))
+        prev_mark_btn.setFixedSize(28, 28)
+        prev_mark_btn.setFlat(True)
+        prev_mark_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        prev_mark_btn.setToolTip("Previous marked frame")
+        prev_mark_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+        )
+        prev_mark_btn.clicked.connect(self.jump_to_prev_mark.emit)
+        layout.addWidget(prev_mark_btn)
+
+        # Toggle mark on current frame
+        self._mark_btn = QPushButton()
+        self._mark_btn.setIcon(get_icon("bookmark", Colors.TEXT_DIM, 14))
+        self._mark_btn.setFixedSize(28, 28)
+        self._mark_btn.setFlat(True)
+        self._mark_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mark_btn.setToolTip("Toggle bookmark on current frame (M)")
+        self._mark_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+        )
+        self._mark_btn.clicked.connect(self._toggle_mark)
+        layout.addWidget(self._mark_btn)
+
+        # Next marked frame
+        next_mark_btn = QPushButton()
+        next_mark_btn.setIcon(get_icon("skip-forward", Colors.TEXT_DIM, 14))
+        next_mark_btn.setFixedSize(28, 28)
+        next_mark_btn.setFlat(True)
+        next_mark_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        next_mark_btn.setToolTip("Next marked frame")
+        next_mark_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+        )
+        next_mark_btn.clicked.connect(self.jump_to_next_mark.emit)
+        layout.addWidget(next_mark_btn)
+
+        # Mark count label
+        self._mark_count_label = QLabel("")
+        self._mark_count_label.setStyleSheet(
+            f"color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent;"
+        )
+        layout.addWidget(self._mark_count_label)
+
+        self._is_current_marked = False
+
     # --- Public API ---
 
     def set_total_frames(self, total: int) -> None:
@@ -192,6 +251,24 @@ class FrameNavigator(QWidget):
         """Get (start, end) frame range."""
         return self._start_spin.value(), self._end_spin.value()
 
+    def update_mark_state(self, marked_frames: set[int]) -> None:
+        """Update bookmark visual state for current frame and count."""
+        self._is_current_marked = self._current_frame in marked_frames
+        if self._is_current_marked:
+            self._mark_btn.setIcon(get_icon("bookmark", Colors.PRIMARY, 14))
+            self._mark_btn.setStyleSheet(
+                f"QPushButton {{ background: {Colors.PRIMARY_BG}; border: none; border-radius: 4px; }}"
+                f"QPushButton:hover {{ background: rgba(99,102,241,0.2); }}"
+            )
+        else:
+            self._mark_btn.setIcon(get_icon("bookmark", Colors.TEXT_DIM, 14))
+            self._mark_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+            )
+        count = len(marked_frames)
+        self._mark_count_label.setText(f"{count}" if count else "")
+
     # --- Private slots ---
 
     def _prev_frame(self) -> None:
@@ -214,3 +291,6 @@ class FrameNavigator(QWidget):
 
     def _on_end_changed(self, value: int) -> None:
         self.end_frame_changed.emit(value)
+
+    def _toggle_mark(self) -> None:
+        self.mark_frame_toggled.emit(self._current_frame)

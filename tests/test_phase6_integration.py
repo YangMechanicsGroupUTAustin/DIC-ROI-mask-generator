@@ -46,7 +46,7 @@ class MockProcessingController(QObject):
     def is_running(self):
         return self._running
 
-    def start_processing(self):
+    def start_processing(self, skip_existing: bool = False):
         self.start_processing_called = True
         self._running = True
 
@@ -57,6 +57,13 @@ class MockProcessingController(QObject):
     def start_correction(self, frame_idx, points, labels):
         self.start_correction_calls.append((frame_idx, points, labels))
         self._running = True
+
+    @property
+    def _mask_generator(self):
+        """Mock mask generator for correction validation."""
+        class _MockMG:
+            is_initialized = False
+        return _MockMG()
 
 
 class MockSmoothingController(QObject):
@@ -276,6 +283,7 @@ class TestMainWindowProcessingValidation:
 
     def test_no_images_shows_error(self, wired_window, state, processing_ctrl):
         """Start processing with no images should show error, not start."""
+        state._image_files = []  # Ensure no images loaded
         with patch.object(wired_window, '_show_error') as mock_err:
             wired_window._on_start_processing()
             mock_err.assert_called_once()
@@ -285,6 +293,7 @@ class TestMainWindowProcessingValidation:
     def test_no_output_dir_shows_error(self, wired_window, state, processing_ctrl):
         """Start processing with no output dir should show error."""
         state._image_files = ["a.png"]
+        state._output_dir = ""  # Ensure no output dir
         with patch.object(wired_window, '_show_error') as mock_err:
             wired_window._on_start_processing()
             mock_err.assert_called_once()
@@ -295,6 +304,8 @@ class TestMainWindowProcessingValidation:
         """Start processing with no points should show error."""
         state._image_files = ["a.png"]
         state._output_dir = "/tmp/out"
+        state._points = []  # Ensure no points
+        state._labels = []
         with patch.object(wired_window, '_show_error') as mock_err:
             wired_window._on_start_processing()
             mock_err.assert_called_once()
@@ -313,12 +324,13 @@ class TestMainWindowProcessingValidation:
 class TestMainWindowCorrectionHandlers:
     """Test correction-related handlers."""
 
-    def test_add_correction_transitions(self, wired_window, state):
-        """_on_add_correction should transition to CORRECTION state."""
+    def test_add_correction_blocked_without_model(self, wired_window, state):
+        """_on_add_correction should NOT transition without initialized model."""
         from controllers.app_state import AppState
         state.set_state(AppState.State.REVIEWING)
         wired_window._on_add_correction()
-        assert state.state == AppState.State.CORRECTION
+        # Model is not initialized in mock, so state stays REVIEWING
+        assert state.state == AppState.State.REVIEWING
 
     def test_apply_correction_no_points(self, wired_window, state, processing_ctrl):
         """_on_apply_correction with no points should show error."""

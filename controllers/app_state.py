@@ -44,6 +44,7 @@ class AppState(QObject):
     processing_error = pyqtSignal(str)
     current_images_changed = pyqtSignal()          # original/mask/overlay updated
     preprocessing_changed = pyqtSignal()           # preprocessing config updated
+    marked_frames_changed = pyqtSignal(set)         # set of 1-based frame indices
     vram_updated = pyqtSignal(float, float)        # used_gb, total_gb
     status_message = pyqtSignal(str, str)          # message, level (ready/processing/error/warning)
 
@@ -79,10 +80,18 @@ class AppState(QObject):
         self._model_name = "SAM2 Hiera Large"
         self._threshold = 0.0
         self._intermediate_format = "JPEG (fast)"
+        self._mask_output_format = "TIFF (default)"
         self._force_reprocess = False
 
         # Preprocessing
         self._preprocessing_config = PreprocessingConfig()
+
+        # Marked/bookmarked frames (1-based indices)
+        self._marked_frames: set[int] = set()
+
+        # Overlay display settings
+        self._overlay_alpha = 0.4
+        self._overlay_color = (255, 0, 0)  # RGB red
 
         # Display images (numpy arrays, RGB uint8)
         self._current_original: Optional[np.ndarray] = None
@@ -112,11 +121,24 @@ class AppState(QObject):
         if self._input_dir != path:
             self._input_dir = path
             self.input_dir_changed.emit(path)
-            # Auto-discover images
-            if os.path.isdir(path):
-                from core.image_processing import get_image_files
-                files = get_image_files(path)
-                self.set_image_files(files)
+            # Validate and auto-discover images
+            if not os.path.isdir(path):
+                self.status_message.emit(
+                    f"Directory does not exist: {path}", "error",
+                )
+                return
+            if not os.access(path, os.R_OK):
+                self.status_message.emit(
+                    f"Directory is not readable: {path}", "error",
+                )
+                return
+            from core.image_processing import get_image_files
+            files = get_image_files(path)
+            if not files:
+                self.status_message.emit(
+                    "No supported images found in directory", "warning",
+                )
+            self.set_image_files(files)
 
     @property
     def output_dir(self) -> str:
@@ -249,6 +271,13 @@ class AppState(QObject):
             self.format_changed.emit(fmt)
 
     @property
+    def mask_output_format(self) -> str:
+        return self._mask_output_format
+
+    def set_mask_output_format(self, fmt: str) -> None:
+        self._mask_output_format = fmt
+
+    @property
     def force_reprocess(self) -> bool:
         return self._force_reprocess
 
@@ -262,6 +291,35 @@ class AppState(QObject):
     def set_preprocessing_config(self, config: PreprocessingConfig) -> None:
         self._preprocessing_config = config
         self.preprocessing_changed.emit()
+
+    # --- Marked frames ---
+
+    @property
+    def marked_frames(self) -> set[int]:
+        return self._marked_frames
+
+    def toggle_marked_frame(self, frame: int) -> None:
+        """Toggle bookmark on a frame. Returns new state."""
+        if frame in self._marked_frames:
+            self._marked_frames.discard(frame)
+        else:
+            self._marked_frames.add(frame)
+        self.marked_frames_changed.emit(set(self._marked_frames))
+
+    def clear_marked_frames(self) -> None:
+        """Remove all bookmarks."""
+        self._marked_frames.clear()
+        self.marked_frames_changed.emit(set(self._marked_frames))
+
+    def next_marked_frame(self, current: int) -> int | None:
+        """Return the next marked frame after current, or None."""
+        above = sorted(f for f in self._marked_frames if f > current)
+        return above[0] if above else None
+
+    def prev_marked_frame(self, current: int) -> int | None:
+        """Return the previous marked frame before current, or None."""
+        below = sorted((f for f in self._marked_frames if f < current), reverse=True)
+        return below[0] if below else None
 
     # --- Display images ---
 
@@ -291,6 +349,12 @@ class AppState(QObject):
             self._current_overlay = overlay
         self.current_images_changed.emit()
 
+    def clear_display_images(self) -> None:
+        """Clear all cached display images (original, mask, overlay)."""
+        self._current_original = None
+        self._current_mask = None
+        self._current_overlay = None
+
     # --- Model helpers ---
 
     def get_model_config(self) -> tuple[str, str]:
@@ -299,6 +363,20 @@ class AppState(QObject):
             self._model_name,
             ("sam2.1_hiera_l.yaml", "sam2.1_hiera_large.pt"),
         )
+
+    @property
+    def overlay_alpha(self) -> float:
+        return self._overlay_alpha
+
+    def set_overlay_alpha(self, alpha: float) -> None:
+        self._overlay_alpha = max(0.0, min(1.0, alpha))
+
+    @property
+    def overlay_color(self) -> tuple[int, int, int]:
+        return self._overlay_color
+
+    def set_overlay_color(self, color: tuple[int, int, int]) -> None:
+        self._overlay_color = color
 
     @property
     def total_frames(self) -> int:
