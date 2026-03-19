@@ -370,6 +370,7 @@ class CanvasPanel(QWidget):
         self._eye_btn.setFixedSize(24, 24)
         self._eye_btn.setFlat(True)
         self._eye_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._eye_btn.setToolTip("Toggle annotation overlay visibility")
         self._eye_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); border-radius: 4px; }"
@@ -383,6 +384,7 @@ class CanvasPanel(QWidget):
         max_btn.setFixedSize(24, 24)
         max_btn.setFlat(True)
         max_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        max_btn.setToolTip("Maximize this panel")
         max_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); border-radius: 4px; }"

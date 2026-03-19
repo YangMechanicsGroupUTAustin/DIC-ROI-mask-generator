@@ -213,11 +213,19 @@ class Sidebar(QWidget):
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
         )
+        self._pp_custom_frames_check.setToolTip(
+            "Process only selected frames instead of the full range.\n"
+            "Enter comma-separated frame numbers or ranges (e.g. 1-10, 15, 20-30)."
+        )
         self._pp_custom_frames_check.stateChanged.connect(self._on_pp_changed)
         pp_custom_layout.addWidget(self._pp_custom_frames_check)
 
         self._pp_custom_frames_input = QLineEdit()
         self._pp_custom_frames_input.setPlaceholderText("1-10, 15, 20-30")
+        self._pp_custom_frames_input.setToolTip(
+            "Specify frames to process: comma-separated numbers or ranges.\n"
+            "Example: 1-10, 15, 20-30"
+        )
         self._pp_custom_frames_input.setEnabled(False)
         self._pp_custom_frames_input.setStyleSheet(
             f"QLineEdit {{ background: {Colors.BG_DARK}; color: {Colors.TEXT_PRIMARY}; "
@@ -239,6 +247,7 @@ class Sidebar(QWidget):
         self._pp_gain = SliderInput(
             "Gain", default=1.0, min_val=0.1, max_val=5.0,
             step=0.01, decimals=2,
+            tooltip="Multiplicative gain applied to pixel intensity.\n1.0 = no change. >1.0 brightens, <1.0 darkens.",
         )
         self._pp_gain.value_changed.connect(self._on_pp_changed)
         self._tone_popup.add_popup_widget(self._pp_gain)
@@ -246,6 +255,7 @@ class Sidebar(QWidget):
         self._pp_brightness = SliderInput(
             "Brightness", default=0, min_val=-255, max_val=255,
             step=1, decimals=0,
+            tooltip="Additive brightness offset.\n0 = no change. Positive = brighter, negative = darker.",
         )
         self._pp_brightness.value_changed.connect(self._on_pp_changed)
         self._tone_popup.add_popup_widget(self._pp_brightness)
@@ -253,6 +263,7 @@ class Sidebar(QWidget):
         self._pp_contrast = SliderInput(
             "Contrast", default=1.0, min_val=0.0, max_val=5.0,
             step=0.01, decimals=2,
+            tooltip="Contrast scaling factor.\n1.0 = no change. >1.0 increases contrast, <1.0 decreases.",
         )
         self._pp_contrast.value_changed.connect(self._on_pp_changed)
         self._tone_popup.add_popup_widget(self._pp_contrast)
@@ -260,6 +271,7 @@ class Sidebar(QWidget):
         self._pp_clip_min = SliderInput(
             "Clip Min", default=0, min_val=0, max_val=254,
             step=1, decimals=0,
+            tooltip="Minimum intensity clamp. Pixel values below this are set to 0.",
         )
         self._pp_clip_min.value_changed.connect(self._on_pp_changed)
         self._tone_popup.add_popup_widget(self._pp_clip_min)
@@ -267,6 +279,7 @@ class Sidebar(QWidget):
         self._pp_clip_max = SliderInput(
             "Clip Max", default=255, min_val=1, max_val=255,
             step=1, decimals=0,
+            tooltip="Maximum intensity clamp. Pixel values above this are set to 255.",
         )
         self._pp_clip_max.value_changed.connect(self._on_pp_changed)
         self._tone_popup.add_popup_widget(self._pp_clip_max)
@@ -276,6 +289,10 @@ class Sidebar(QWidget):
         self._pp_clahe_check.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
+        )
+        self._pp_clahe_check.setToolTip(
+            "Contrast Limited Adaptive Histogram Equalization.\n"
+            "Enhances local contrast — useful for low-contrast microscopy images."
         )
         self._pp_clahe_check.stateChanged.connect(self._on_pp_changed)
         self._tone_popup.add_popup_widget(self._pp_clahe_check)
@@ -288,6 +305,7 @@ class Sidebar(QWidget):
         self._pp_clahe_clip = NumberInput(
             "CLAHE Clip", default=2.0, min_val=0.1, max_val=40.0,
             step=0.5, decimals=1, icon_name="gauge",
+            tooltip="CLAHE clip limit. Higher values allow more contrast enhancement.\nLow values (1-3) give subtle results; high values (10+) are aggressive.",
         )
         self._pp_clahe_clip.value_changed.connect(self._on_pp_changed)
         pp_clahe_layout.addWidget(self._pp_clahe_clip, 0, 0)
@@ -295,6 +313,7 @@ class Sidebar(QWidget):
         self._pp_clahe_tile = NumberInput(
             "Tile Size", default=8, min_val=2, max_val=32,
             step=1, decimals=0, icon_name="hash",
+            tooltip="CLAHE grid tile size (NxN pixels).\nSmaller tiles give more localized contrast enhancement.",
         )
         self._pp_clahe_tile.value_changed.connect(self._on_pp_changed)
         pp_clahe_layout.addWidget(self._pp_clahe_tile, 0, 1)
@@ -309,6 +328,7 @@ class Sidebar(QWidget):
         self._pp_gaussian = SliderInput(
             "Gaussian Sigma", default=0.0, min_val=0.0, max_val=10.0,
             step=0.1, decimals=1,
+            tooltip="Standard deviation of Gaussian blur.\n0 = off. Higher values produce stronger smoothing.",
         )
         self._pp_gaussian.value_changed.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_gaussian)
@@ -318,12 +338,17 @@ class Sidebar(QWidget):
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
         )
+        self._pp_bilateral_check.setToolTip(
+            "Bilateral filter smooths while preserving edges.\n"
+            "Good for reducing noise without blurring boundaries."
+        )
         self._pp_bilateral_check.stateChanged.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_bilateral_check)
 
         self._pp_median = SliderInput(
             "Median Ksize (0=off)", default=0, min_val=0, max_val=31,
             step=1, decimals=0,
+            tooltip="Median filter kernel size (must be odd).\n0 = off. Effective at removing salt-and-pepper noise.",
         )
         self._pp_median.value_changed.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_median)
@@ -331,6 +356,7 @@ class Sidebar(QWidget):
         self._pp_box = SliderInput(
             "Box Ksize", default=0, min_val=0, max_val=31,
             step=1, decimals=0,
+            tooltip="Box (averaging) filter kernel size.\n0 = off. Uniform smoothing — simple but fast.",
         )
         self._pp_box.value_changed.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_box)
@@ -340,12 +366,17 @@ class Sidebar(QWidget):
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
         )
+        self._pp_nlm_check.setToolTip(
+            "Non-Local Means denoising. High quality but computationally slow.\n"
+            "Best for images with significant Gaussian noise."
+        )
         self._pp_nlm_check.stateChanged.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_nlm_check)
 
         self._pp_nlm_h = SliderInput(
             "NLM Strength", default=10.0, min_val=1.0, max_val=40.0,
             step=1.0, decimals=0,
+            tooltip="Filter strength (h parameter).\nHigher values remove more noise but may blur details.",
         )
         self._pp_nlm_h.value_changed.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_nlm_h)
@@ -354,6 +385,10 @@ class Sidebar(QWidget):
         self._pp_diffusion_check.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
+        )
+        self._pp_diffusion_check.setToolTip(
+            "Perona-Malik anisotropic diffusion for edge-preserving smoothing.\n"
+            "Smooths homogeneous regions while preserving strong edges."
         )
         self._pp_diffusion_check.stateChanged.connect(self._on_pp_changed)
         self._smooth_popup.add_popup_widget(self._pp_diffusion_check)
@@ -366,6 +401,7 @@ class Sidebar(QWidget):
         self._pp_diff_iter = NumberInput(
             "Iterations", default=10, min_val=1, max_val=100,
             step=1, decimals=0, icon_name="repeat",
+            tooltip="Number of diffusion iterations.\nMore iterations = stronger smoothing effect.",
         )
         self._pp_diff_iter.value_changed.connect(self._on_pp_changed)
         pp_diff_layout.addWidget(self._pp_diff_iter, 0, 0)
@@ -373,12 +409,14 @@ class Sidebar(QWidget):
         self._pp_diff_kappa = NumberInput(
             "Kappa", default=30.0, min_val=1.0, max_val=200.0,
             step=5.0, decimals=0, icon_name="activity",
+            tooltip="Edge sensitivity (conductance coefficient).\nLow kappa preserves weaker edges; high kappa only preserves strong edges.",
         )
         self._pp_diff_kappa.value_changed.connect(self._on_pp_changed)
         pp_diff_layout.addWidget(self._pp_diff_kappa, 0, 1)
 
         self._pp_diff_option = SelectField(
             "Mode", options=["Option 1 (edges)", "Option 2 (regions)"],
+            tooltip="Diffusion function type.\nOption 1: favors high-contrast edges.\nOption 2: favors wide regions over thin edges.",
         )
         self._pp_diff_option.value_changed.connect(self._on_pp_changed)
         pp_diff_layout.addWidget(self._pp_diff_option, 1, 0, 1, 2)
@@ -395,12 +433,17 @@ class Sidebar(QWidget):
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
         )
+        self._pp_threshold_check.setToolTip(
+            "Convert image to binary (black/white) using a threshold.\n"
+            "Pixels above the threshold become white; below become black."
+        )
         self._pp_threshold_check.stateChanged.connect(self._on_pp_changed)
         self._binarize_popup.add_popup_widget(self._pp_threshold_check)
 
         self._pp_threshold_val = SliderInput(
             "Threshold Value", default=127, min_val=0, max_val=255,
             step=1, decimals=0,
+            tooltip="Intensity cutoff for binarization (0-255).\nOnly used when method is 'Fixed'. Otsu computes automatically.",
         )
         self._pp_threshold_val.value_changed.connect(self._on_pp_changed)
         self._binarize_popup.add_popup_widget(self._pp_threshold_val)
@@ -409,6 +452,7 @@ class Sidebar(QWidget):
             "Threshold Method",
             options=["Fixed", "Otsu", "Adaptive"],
             default="Fixed",
+            tooltip="Fixed: use manual threshold value.\nOtsu: auto-compute optimal threshold.\nAdaptive: local region-based threshold.",
         )
         self._pp_threshold_method.value_changed.connect(self._on_pp_changed)
         self._binarize_popup.add_popup_widget(self._pp_threshold_method)
@@ -417,6 +461,10 @@ class Sidebar(QWidget):
         self._pp_invert_check.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
+        )
+        self._pp_invert_check.setToolTip(
+            "Invert pixel intensities (255 - value).\n"
+            "Useful when foreground is darker than background."
         )
         self._pp_invert_check.stateChanged.connect(self._on_pp_changed)
         self._binarize_popup.add_popup_widget(self._pp_invert_check)
@@ -431,6 +479,10 @@ class Sidebar(QWidget):
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
         )
+        self._pp_morph_check.setToolTip(
+            "Apply morphological operations to the image.\n"
+            "Common uses: close gaps, remove small noise, extract edges."
+        )
         self._pp_morph_check.stateChanged.connect(self._on_pp_changed)
         self._morph_popup.add_popup_widget(self._pp_morph_check)
 
@@ -441,6 +493,7 @@ class Sidebar(QWidget):
                 "Gradient", "Top-hat", "Black-hat",
             ],
             default="Close",
+            tooltip="Dilate: expand bright regions. Erode: shrink bright regions.\nOpen: remove small bright spots. Close: fill small dark gaps.\nGradient: edge detection. Top/Black-hat: extract small features.",
         )
         self._pp_morph_op.value_changed.connect(self._on_pp_changed)
         self._morph_popup.add_popup_widget(self._pp_morph_op)
@@ -453,6 +506,7 @@ class Sidebar(QWidget):
         self._pp_morph_kernel = NumberInput(
             "Kernel Size", default=3, min_val=3, max_val=51,
             step=2, decimals=0, icon_name="hash",
+            tooltip="Structuring element size (must be odd).\nLarger kernels produce stronger morphological effects.",
         )
         self._pp_morph_kernel.value_changed.connect(self._on_pp_changed)
         pp_morph_grid_layout.addWidget(self._pp_morph_kernel, 0, 0)
@@ -460,6 +514,7 @@ class Sidebar(QWidget):
         self._pp_morph_iter = NumberInput(
             "Iterations", default=1, min_val=1, max_val=20,
             step=1, decimals=0, icon_name="hash",
+            tooltip="Number of times the morphological operation is applied.\nMore iterations amplify the effect.",
         )
         self._pp_morph_iter.value_changed.connect(self._on_pp_changed)
         pp_morph_grid_layout.addWidget(self._pp_morph_iter, 0, 1)
@@ -470,6 +525,10 @@ class Sidebar(QWidget):
         self._pp_fill_holes_check.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
+        )
+        self._pp_fill_holes_check.setToolTip(
+            "Fill enclosed dark holes within bright regions.\n"
+            "Applied after morphological operations."
         )
         self._pp_fill_holes_check.stateChanged.connect(self._on_pp_changed)
         self._morph_popup.add_popup_widget(self._pp_fill_holes_check)
@@ -486,6 +545,10 @@ class Sidebar(QWidget):
 
         self._add_shape_btn = QPushButton("Add \u25BC")
         self._add_shape_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_shape_btn.setToolTip(
+            "Draw a shape to fill with white (foreground).\n"
+            "Choose Rect, Circle, or Polygon from the dropdown."
+        )
         self._add_shape_btn.setStyleSheet(
             f"QPushButton {{ background: {Colors.SUCCESS_BG}; "
             f"color: {Colors.SUCCESS}; border: 1px solid {Colors.SUCCESS_BORDER}; "
@@ -502,6 +565,10 @@ class Sidebar(QWidget):
 
         self._cut_shape_btn = QPushButton("Cut \u25BC")
         self._cut_shape_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cut_shape_btn.setToolTip(
+            "Draw a shape to fill with black (background).\n"
+            "Choose Rect, Circle, or Polygon from the dropdown."
+        )
         self._cut_shape_btn.setStyleSheet(
             f"QPushButton {{ background: {Colors.DANGER_BG}; "
             f"color: {Colors.DANGER}; border: 1px solid {Colors.DANGER_BORDER}; "
@@ -537,6 +604,7 @@ class Sidebar(QWidget):
                 "High Noise (Denoise)", "Edge Enhancement",
             ],
             default="None (identity)",
+            tooltip="Built-in preprocessing presets for common imaging modalities.\nSelect a preset to auto-configure all preprocessing parameters.",
         )
         self._builtin_preset_select.value_changed.connect(
             self._on_builtin_preset_changed,
@@ -551,6 +619,7 @@ class Sidebar(QWidget):
 
         self._save_preset_btn = QPushButton("Save Preset")
         self._save_preset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save_preset_btn.setToolTip("Save current preprocessing settings to a JSON file.")
         self._save_preset_btn.setStyleSheet(
             f"QPushButton {{ background: {Colors.BG_LIGHT}; "
             f"color: {Colors.TEXT_SECONDARY}; border: 1px solid {Colors.BORDER}; "
@@ -563,6 +632,7 @@ class Sidebar(QWidget):
 
         self._load_preset_btn = QPushButton("Load Preset")
         self._load_preset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._load_preset_btn.setToolTip("Load preprocessing settings from a JSON file.")
         self._load_preset_btn.setStyleSheet(
             f"QPushButton {{ background: {Colors.BG_LIGHT}; "
             f"color: {Colors.TEXT_SECONDARY}; border: 1px solid {Colors.BORDER}; "
@@ -577,6 +647,10 @@ class Sidebar(QWidget):
 
         # Save Preprocessed button
         self._save_preprocessed_btn = _create_accent_button("Save Preprocessed")
+        self._save_preprocessed_btn.setToolTip(
+            "Apply current preprocessing to all frames and save to output directory.\n"
+            "Preprocessed images are used as SAM2 input during processing."
+        )
         self._save_preprocessed_btn.clicked.connect(self._on_save_preprocessed)
         preprocess_section.add_widget(self._save_preprocessed_btn)
 
@@ -592,6 +666,7 @@ class Sidebar(QWidget):
             options=["CUDA", "CPU", "MPS"],
             default="CUDA",
             icon_name="cpu",
+            tooltip="CUDA: NVIDIA GPU (~100x faster). CPU: universal fallback.\nMPS: Apple Silicon GPU. CUDA is strongly recommended.",
         )
         self._device_select.value_changed.connect(self.device_changed.emit)
         model_section.add_widget(self._device_select)
@@ -606,6 +681,7 @@ class Sidebar(QWidget):
             ],
             default="SAM2 Hiera Large",
             icon_name="brain",
+            tooltip="Large: best quality (~900 MB, ~1.5 GB VRAM).\nBase Plus: balanced quality/speed.\nSmall: faster, moderate quality.\nTiny: fastest (~150 MB), good for quick tests.",
         )
         self._model_select.value_changed.connect(self.model_changed.emit)
         model_section.add_widget(self._model_select)
@@ -704,12 +780,14 @@ class Sidebar(QWidget):
         self._spatial_iterations = NumberInput(
             "Iterations", default=50, min_val=1, max_val=500,
             step=1, decimals=0, icon_name="hash",
+            tooltip="Number of Perona-Malik diffusion iterations.\nMore iterations produce smoother mask boundaries.",
         )
         spatial_grid_layout.addWidget(self._spatial_iterations, 0, 0)
 
         self._spatial_dt = NumberInput(
             "dt", default=0.1, min_val=0.001, max_val=1.0,
             step=0.01, decimals=3, icon_name="timer",
+            tooltip="Time step per iteration. Smaller = more stable but slower.\nKeep below 0.25 for numerical stability.",
         )
         spatial_grid_layout.addWidget(self._spatial_dt, 0, 1)
 
@@ -718,6 +796,7 @@ class Sidebar(QWidget):
         self._spatial_kappa = NumberInput(
             "Lambda / Kappa", default=30.0, min_val=0.1, max_val=200.0,
             step=0.1, decimals=1, icon_name="sigma",
+            tooltip="Conductance coefficient controlling edge sensitivity.\nLow values preserve weak edges; high values only keep strong edges.",
         )
         spatial_section.add_widget(self._spatial_kappa)
 
@@ -725,6 +804,7 @@ class Sidebar(QWidget):
             "Option",
             options=["Option 1 (exponential)", "Option 2 (rational)"],
             default="Option 1 (exponential)",
+            tooltip="Diffusion function type.\nExponential: better at preserving sharp edges.\nRational: better at preserving wide, gradual edges.",
         )
         spatial_section.add_widget(self._spatial_option)
 
@@ -740,6 +820,10 @@ class Sidebar(QWidget):
         spatial_section.add_widget(self._spatial_replace_check)
 
         self._spatial_btn = _create_accent_button("Apply Spatial Smooth")
+        self._spatial_btn.setToolTip(
+            "Apply Perona-Malik anisotropic diffusion to each mask independently.\n"
+            "Smooths jagged mask boundaries while preserving overall shape."
+        )
         self._spatial_btn.clicked.connect(self._on_spatial_smooth)
         spatial_section.add_widget(self._spatial_btn)
 
@@ -759,12 +843,14 @@ class Sidebar(QWidget):
         self._temporal_var = NumberInput(
             "Var Threshold", default=50000, min_val=0, max_val=999999,
             step=1000, decimals=0, icon_name="gauge",
+            tooltip="Variance threshold for anomaly detection.\nFrames with mask variance above this are flagged and excluded from smoothing.",
         )
         temporal_grid_layout.addWidget(self._temporal_var, 0, 0)
 
         self._temporal_neighbors = NumberInput(
             "Neighbors", default=2, min_val=1, max_val=10,
             step=1, decimals=0, icon_name="hash",
+            tooltip="Number of neighboring frames on each side used for smoothing.\n2 neighbors = 5-frame sliding window (2 before + current + 2 after).",
         )
         temporal_grid_layout.addWidget(self._temporal_neighbors, 0, 1)
 
@@ -773,6 +859,7 @@ class Sidebar(QWidget):
         self._temporal_sigma = NumberInput(
             "Sigma", default=2.0, min_val=0.1, max_val=20.0,
             step=0.1, decimals=1, icon_name="sigma",
+            tooltip="3D Gaussian sigma for temporal smoothing.\nHigher values apply stronger smoothing across frames.",
         )
         temporal_section.add_widget(self._temporal_sigma)
 
@@ -788,6 +875,10 @@ class Sidebar(QWidget):
         temporal_section.add_widget(self._temporal_replace_check)
 
         self._temporal_btn = _create_accent_button("Apply Temporal Smooth")
+        self._temporal_btn.setToolTip(
+            "Apply 3D Gaussian filter across the temporal dimension.\n"
+            "Ensures smooth mask transitions between consecutive frames."
+        )
         self._temporal_btn.clicked.connect(self._on_temporal_smooth)
         temporal_section.add_widget(self._temporal_btn)
 
@@ -824,6 +915,10 @@ class Sidebar(QWidget):
 
         self._refresh_stats_btn = QPushButton("Refresh Statistics")
         self._refresh_stats_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_stats_btn.setToolTip(
+            "Recalculate mask area, frame-to-frame consistency,\n"
+            "and anomaly detection for the active mask directory."
+        )
         self._refresh_stats_btn.setStyleSheet(
             f"QPushButton {{ background: {Colors.BG_LIGHT}; "
             f"color: {Colors.TEXT_SECONDARY}; border: 1px solid {Colors.BORDER}; "

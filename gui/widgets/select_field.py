@@ -27,9 +27,12 @@ class SelectField(QWidget):
         options: list[str],
         default: str = "",
         icon_name: str = "",
+        tooltip: str = "",
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
+        if tooltip:
+            self.setToolTip(tooltip)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

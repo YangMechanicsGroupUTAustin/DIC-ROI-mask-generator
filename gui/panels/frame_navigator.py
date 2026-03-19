@@ -80,11 +80,13 @@ class FrameNavigator(QWidget):
         # --- Frame range ---
         layout.addWidget(_create_uppercase_label("START"))
         self._start_spin = _create_nav_spinbox(1)
+        self._start_spin.setToolTip("First frame to process (1-based)")
         self._start_spin.valueChanged.connect(self._on_start_changed)
         layout.addWidget(self._start_spin)
 
         layout.addWidget(_create_uppercase_label("END"))
         self._end_spin = _create_nav_spinbox(1)
+        self._end_spin.setToolTip("Last frame to process (1-based)")
         self._end_spin.valueChanged.connect(self._on_end_changed)
         layout.addWidget(self._end_spin)
 
@@ -97,6 +99,7 @@ class FrameNavigator(QWidget):
         prev_btn.setFixedSize(28, 28)
         prev_btn.setFlat(True)
         prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        prev_btn.setToolTip("Previous frame [Left Arrow]")
         prev_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
@@ -149,6 +152,7 @@ class FrameNavigator(QWidget):
         next_btn.setFixedSize(28, 28)
         next_btn.setFlat(True)
         next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        next_btn.setToolTip("Next frame [Right Arrow]")
         next_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
@@ -163,6 +167,7 @@ class FrameNavigator(QWidget):
         layout.addWidget(_create_uppercase_label("PREVIEW"))
 
         self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setToolTip("Drag to navigate frames quickly")
         self._slider.setRange(1, 1)
         self._slider.setValue(1)
         self._slider.setSizePolicy(
