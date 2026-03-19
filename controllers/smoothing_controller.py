@@ -19,6 +19,10 @@ from core.image_processing import get_image_files
 logger = logging.getLogger("sam2studio.smoothing_controller")
 
 
+class _SmoothingAbort(Exception):
+    """Raised inside a worker to signal a non-exception abort (e.g. no input files)."""
+
+
 class SpatialSmoothWorker(QThread):
     """Background worker for spatial smoothing of mask files."""
     progress = pyqtSignal(int, int)       # current, total
@@ -53,10 +57,13 @@ class SpatialSmoothWorker(QThread):
     def run(self):
         try:
             self._run_smoothing()
+        except _SmoothingAbort as e:
+            self.error.emit(str(e))
+            return
         except Exception as e:
             logger.exception("Spatial smoothing failed")
             self.error.emit(str(e))
-            return  # Do NOT emit finished on error
+            return
         self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
@@ -64,8 +71,7 @@ class SpatialSmoothWorker(QThread):
 
         mask_files = get_image_files(self._input_dir)
         if not mask_files:
-            self.error.emit(f"No mask files found in {self._input_dir}")
-            return
+            raise _SmoothingAbort(f"No mask files found in {self._input_dir}")
 
         os.makedirs(self._output_dir, exist_ok=True)
         total = len(mask_files)
@@ -130,10 +136,13 @@ class TemporalSmoothWorker(QThread):
     def run(self):
         try:
             self._run_smoothing()
+        except _SmoothingAbort as e:
+            self.error.emit(str(e))
+            return
         except Exception as e:
             logger.exception("Temporal smoothing failed")
             self.error.emit(str(e))
-            return  # Do NOT emit finished on error
+            return
         self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
@@ -141,8 +150,7 @@ class TemporalSmoothWorker(QThread):
 
         mask_files = get_image_files(self._input_dir)
         if not mask_files:
-            self.error.emit(f"No mask files found in {self._input_dir}")
-            return
+            raise _SmoothingAbort(f"No mask files found in {self._input_dir}")
 
         os.makedirs(self._output_dir, exist_ok=True)
 
@@ -157,8 +165,7 @@ class TemporalSmoothWorker(QThread):
                 if frames:
                     mask = np.zeros_like(frames[0])
                 else:
-                    self.error.emit(f"First mask unreadable: {path}")
-                    return
+                    raise _SmoothingAbort(f"First mask unreadable: {path}")
             frames.append(mask)
 
         def on_progress(step_name, current, total):

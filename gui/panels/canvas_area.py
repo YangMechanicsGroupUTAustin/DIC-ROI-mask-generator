@@ -139,17 +139,18 @@ class CanvasArea(QWidget):
         zoom_layout.addWidget(reset_btn)
 
         # Grid toggle
-        grid_btn = QPushButton()
-        grid_btn.setIcon(get_icon("grid", Colors.TEXT_DIM, 14))
-        grid_btn.setFixedSize(28, 28)
-        grid_btn.setFlat(True)
-        grid_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        grid_btn.setToolTip("Toggle grid overlay")
-        grid_btn.setStyleSheet(
+        self._grid_btn = QPushButton()
+        self._grid_btn.setIcon(get_icon("grid", Colors.TEXT_DIM, 14))
+        self._grid_btn.setFixedSize(28, 28)
+        self._grid_btn.setFlat(True)
+        self._grid_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._grid_btn.setToolTip("Toggle grid overlay")
+        self._grid_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 4px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.05); }"
         )
-        zoom_layout.addWidget(grid_btn)
+        self._grid_btn.clicked.connect(self._toggle_grid)
+        zoom_layout.addWidget(self._grid_btn)
 
         zoom_layout.addWidget(_create_zoom_divider())
 
@@ -230,10 +231,18 @@ class CanvasArea(QWidget):
 
         main_layout.addWidget(splitter, 1)
 
+        self._splitter = splitter
         self._current_zoom = 100
         self._ab_active = False
+        self._grid_active = False
+        self._maximized_panel: CanvasPanel | None = None
         self._cached_overlay: np.ndarray | None = None
         self._cached_original: np.ndarray | None = None
+
+        # Connect maximize signals from each panel
+        self._original.maximize_toggled.connect(self._toggle_panel_maximize)
+        self._mask.maximize_toggled.connect(self._toggle_panel_maximize)
+        self._overlay.maximize_toggled.connect(self._toggle_panel_maximize)
 
         # Pan synchronization across panels
         self._syncing_pan = False
@@ -402,6 +411,53 @@ class CanvasArea(QWidget):
                     panel.sync_scroll(h_val, v_val)
         finally:
             self._syncing_pan = False
+
+    def _toggle_grid(self) -> None:
+        """Toggle grid overlay on all three panels."""
+        self._grid_active = not self._grid_active
+        for panel in (self._original, self._mask, self._overlay):
+            panel.set_grid_visible(self._grid_active)
+        # Update button style
+        if self._grid_active:
+            self._grid_btn.setStyleSheet(
+                f"QPushButton {{ background: {Colors.PRIMARY_BG}; border: none; "
+                f"border-radius: 4px; }}"
+                f"QPushButton:hover {{ background: rgba(99,102,241,0.2); }}"
+            )
+        else:
+            self._grid_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+            )
+
+    def _toggle_panel_maximize(self, panel: CanvasPanel) -> None:
+        """Maximize a single panel (hide others) or restore all three."""
+        panels = [self._original, self._mask, self._overlay]
+        if self._maximized_panel is panel:
+            # Restore all panels
+            for p in panels:
+                p.setVisible(True)
+            self._maximized_panel = None
+            panel._max_btn.setIcon(
+                get_icon("maximize", Colors.TEXT_DIM, 14)
+            )
+            panel._max_btn.setToolTip("Maximize this panel")
+        else:
+            # Maximize this panel, hide others
+            for p in panels:
+                p.setVisible(p is panel)
+            if self._maximized_panel is not None:
+                self._maximized_panel._max_btn.setIcon(
+                    get_icon("maximize", Colors.TEXT_DIM, 14)
+                )
+                self._maximized_panel._max_btn.setToolTip(
+                    "Maximize this panel"
+                )
+            self._maximized_panel = panel
+            panel._max_btn.setIcon(
+                get_icon("minimize", Colors.TEXT_DIM, 14)
+            )
+            panel._max_btn.setToolTip("Restore all panels")
 
     def _set_all_zoom(self, percent: int) -> None:
         self._current_zoom = percent

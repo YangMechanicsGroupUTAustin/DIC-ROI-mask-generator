@@ -253,16 +253,16 @@ class Toolbar(QWidget):
         # Spacer
         layout.addStretch()
 
-        # --- Processing controls ---
+        # --- Mask Correction (2-step workflow) ---
         self._add_correction_btn = ToolButton(
-            "plus-circle", "Correct Mask"
+            "plus-circle", "Fix Mask"
         )
         self._add_correction_btn.setToolTip(
-            "Correct Mask\n"
-            "After processing, navigate to a frame where the mask\n"
-            "is inaccurate, then click this to enter correction mode.\n"
-            "Add new foreground/background points to fix the mask,\n"
-            "then click 'Apply & Re-propagate'."
+            "Step 1: Fix Mask on Current Frame\n"
+            "Navigate to a frame with an inaccurate mask, then\n"
+            "click this to add correction points.\n"
+            "Use Foreground/Background to mark include/exclude areas.\n"
+            "When done, click 'Apply & Propagate' (step 2)."
         )
         self._add_correction_btn.clicked.connect(
             self.add_correction_requested.emit
@@ -270,32 +270,36 @@ class Toolbar(QWidget):
         layout.addWidget(self._add_correction_btn)
 
         self._apply_correction_btn = ToolButton(
-            "check-circle", "Apply & Re-propagate", variant="success"
+            "check-circle", "Apply & Propagate", variant="success"
         )
         self._apply_correction_btn.setToolTip(
-            "Apply & Re-propagate\n"
-            "Apply correction points and re-generate masks\n"
-            "from the current frame forward through all\n"
-            "remaining frames."
+            "Step 2: Apply & Propagate\n"
+            "Re-generate masks from the corrected frame\n"
+            "forward through all remaining frames.\n"
+            "Only available after adding correction points."
         )
         self._apply_correction_btn.clicked.connect(
             self.apply_correction_requested.emit
         )
         layout.addWidget(self._apply_correction_btn)
 
-        # Force re-process checkbox
-        self._force_reprocess = QCheckBox("Force Re-convert")
+        # Divider
+        layout.addWidget(_create_divider())
+
+        # Force re-convert (separate from correction workflow)
+        self._force_reprocess = QCheckBox("Re-convert")
         self._force_reprocess.setToolTip(
             "Force Re-convert Images\n"
-            "When checked, re-converts all source images to the\n"
-            "intermediate format even if converted files already\n"
-            "exist. Only needed if source images have changed."
+            "Re-converts all source images to the intermediate\n"
+            "format before processing. Only needed if you changed\n"
+            "the source images since the last run."
+        )
+        self._force_reprocess.setStyleSheet(
+            f"QCheckBox {{ color: {Colors.TEXT_DIM}; "
+            f"font-size: {Fonts.SIZE_SM}px; background: transparent; }}"
         )
         self._force_reprocess.toggled.connect(self.force_reprocess_changed.emit)
         layout.addWidget(self._force_reprocess)
-
-        # Divider
-        layout.addWidget(_create_divider())
 
         # Start / Stop processing
         self._start_btn = QPushButton("Start Processing")
