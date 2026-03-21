@@ -3,20 +3,46 @@
 A professional desktop application for automatic mask generation in Digital Image Correlation (DIC) and Region of Interest (ROI) workflows.
 Powered by [Meta SAM2](https://github.com/facebookresearch/sam2) with a full-featured PyQt6 GUI.
 
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/cavi_demo.mp4" width="100%" autoplay loop muted playsinline>
+    Your browser does not support the video tag.
+  </video>
+</p>
+
+> Upload `assets/cavi_demo.mp4` to your GitHub repo's assets (drag into an issue/PR) and replace the `src` URL above with the generated link.
+
 ---
 
 ## Highlights
 
 | Capability | Details |
 |---|---|
-| **Interactive Annotation** | Point-based foreground/background marking, undo/redo history (up to 100 steps), correction mode for re-propagation from any frame |
+| **Interactive Annotation** | Point-based foreground/background marking with undo/redo history (up to 100 steps) |
+| **Mid-Sequence Correction** | Fix inaccurate masks on any frame and re-propagate forward — no need to reprocess the entire sequence |
 | **Multi-Model Support** | SAM2 Hiera Large / Base Plus / Small / Tiny — pick quality vs speed |
 | **GPU Acceleration** | CUDA auto-detection for NVIDIA GPUs (~100x faster than CPU) with real-time VRAM monitoring |
-| **28-Parameter Preprocessing** | Tone, smoothing, binarization, morphology, anisotropic diffusion — with 7 built-in presets for common imaging modalities |
-| **Post-Processing** | Perona-Malik spatial smoothing and 3D Gaussian temporal smoothing in a dedicated panel |
-| **Batch Processing** | Queue multiple image directories for sequential processing |
+| **28-Parameter Preprocessing** | Tone, smoothing, binarization, morphology, anisotropic diffusion — with 7 built-in presets including DIC Microscopy |
+| **Post-Processing** | Perona-Malik spatial smoothing + 3D Gaussian temporal smoothing with smart chaining and mask view switcher |
+| **Three-Panel Canvas** | Original / Mask / Overlay side-by-side with synchronized zoom, pan, grid overlay, and panel maximize |
 | **Project Persistence** | Save/load complete workspace state (`.s2proj`), annotation configs, and preprocessing presets |
 | **Export** | Mask output in TIFF/PNG, contour export in PNG/SVG, optional overlay images |
+| **Batch Processing** | Queue multiple image directories for sequential processing |
+
+---
+
+## Demo
+
+### Mask Generation Workflow
+
+<p align="center">
+  <img src="assets/Mask_generator_demo_video.gif" alt="Mask Generation Demo" width="90%">
+</p>
+
+### Post-Processing Smoothing
+
+<p align="center">
+  <img src="assets/Smoothing_demo_video.gif" alt="Smoothing Demo" width="90%">
+</p>
 
 ---
 
@@ -87,11 +113,11 @@ python main.py
 └──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
 ```
 
-1. **Set Directories** — Select input image folder and output folder from the sidebar or File menu.
-2. **Annotate** — Click on the first frame to place foreground (green) and background (red) points. Use `V` for foreground mode, `D` for background mode.
+1. **Set Directories** — Select input image folder and output folder from the sidebar or `File > Open Input Directory`.
+2. **Annotate** — Press `D` to activate the draw tool, then click on the first frame to place foreground (green) and background (red) points. Press `Space` to toggle between foreground and background mode.
 3. **Process** — Click *Start Processing* or press `Ctrl+Enter`. SAM2 propagates annotations across all frames. Progress bar with ETA is shown in the status bar.
-4. **Review & Correct** — Browse generated masks frame by frame. Press `E` to enter correction mode — add points on any frame and re-propagate.
-5. **Post-Processing** — After segmentation, the app prompts you to switch to the Post-Processing panel for spatial/temporal smoothing and mask statistics.
+4. **Review & Correct** — Browse generated masks frame by frame. If a mask is inaccurate, click *Fix Mask* on that frame, add correction points, then click *Apply & Propagate* to re-generate from that frame forward.
+5. **Post-Processing** — Switch to the Post-Processing panel for spatial/temporal smoothing. Use the *Viewing Masks From* selector to compare Original, Spatial Smoothed, and Temporal Smoothed results.
 
 > See the [User Manual](docs/USER_MANUAL.md) for a detailed walkthrough of every feature.
 
@@ -99,16 +125,23 @@ python main.py
 
 ## Keyboard Shortcuts
 
-### Annotation
+### Tool Selection
 
 | Key | Action |
 |-----|--------|
-| `V` | Foreground point mode |
-| `D` | Background point mode |
-| `Space` | Toggle foreground/background mode |
-| `E` | Enter correction mode |
+| `V` | Select / Move tool |
+| `D` | Draw points tool |
+| `E` | Erase points tool |
+| `Space` | Toggle foreground / background mode |
+
+### Editing
+
+| Key | Action |
+|-----|--------|
 | `Ctrl+Z` | Undo annotation |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo annotation |
+| `Ctrl+Click` | Toggle point selection |
+| `Delete` | Delete selected points |
 
 ### Navigation
 
@@ -136,18 +169,35 @@ python main.py
 | Key | Action |
 |-----|--------|
 | `Ctrl+Enter` | Start processing |
-| `Escape` | Cancel processing |
+| `Escape` | Stop / Cancel |
 | `Ctrl+0` | Reset zoom |
 | `Ctrl+1` | Fit to window |
+| `Scroll Wheel` | Zoom in / out |
+| `Middle-click drag` | Pan view |
 | `F1` | Show shortcuts dialog |
 
 ---
 
 ## Features
 
+### Three-Panel Canvas
+
+The main workspace shows three synchronized panels side by side:
+
+- **Original Frame** (Input) — Interactive annotation canvas for placing foreground/background points
+- **Mask Preview** (Segmentation) — Real-time binary mask display
+- **Overlay** (Result) — Original image with mask overlay for visual verification
+
+Each panel supports:
+- **Eye toggle** — Show/hide the panel content
+- **Maximize** — Expand a single panel to full width (click again to restore all three)
+- **Grid overlay** — Toggle an 8x8 reference grid across all panels
+- **A/B comparison** — Toggle the overlay panel between result and original for quick comparison
+- **Synchronized zoom & pan** — All panels zoom and pan together
+
 ### Preprocessing Pipeline
 
-The sidebar **Processing** panel provides a 28-parameter preprocessing pipeline with live preview. Parameters are grouped into hover-popup categories:
+The sidebar **Processing** panel provides a 28-parameter preprocessing pipeline with live preview (500ms debounce). Parameters are grouped into hover-popup categories:
 
 | Category | Parameters |
 |----------|-----------|
@@ -163,15 +213,30 @@ Custom presets can be saved/loaded as JSON files.
 
 ### Post-Processing Panel
 
-After segmentation, switch to the **Post-Processing** panel (automatic prompt or manual toggle):
+After segmentation, switch to the **Post-Processing** panel:
 
-- **Spatial Smoothing** — Perona-Malik anisotropic diffusion on each mask independently
+- **Mask View Switcher** — Toggle between viewing Original masks, Spatial Smoothed, or Temporal Smoothed results. New options appear automatically after applying smoothing.
+
+- **Spatial Smoothing** — Perona-Malik anisotropic diffusion on each mask independently.
+  Smooths jagged boundaries while preserving overall shape.
   - Parameters: iterations, dt (time step), kappa (conductance), diffusion option
-- **Temporal Smoothing** — 3D Gaussian filter for spatio-temporal coherence across frame sequences
+
+- **Temporal Smoothing** — 3D Gaussian filter for cross-frame coherence.
+  **Smart chaining**: automatically reads from spatial smoothing output when available, enabling a natural Spatial → Temporal pipeline without manual configuration.
   - Parameters: sigma, number of neighbors, variance threshold for bad-frame detection
+
 - **Mask Statistics** — Area coverage, frame-to-frame consistency, anomaly detection
 
-Both smoothing operations show a progress bar with ETA and reload the display automatically on completion.
+Both smoothing operations show a progress bar with ETA and auto-switch the display on completion.
+
+### Mask Correction (2-Step Workflow)
+
+After processing, if a mask is inaccurate on any frame:
+
+1. **Fix Mask** — Navigate to the problematic frame and click *Fix Mask* in the toolbar. Add correction foreground/background points on that frame.
+2. **Apply & Propagate** — Click *Apply & Propagate* to re-generate masks from the corrected frame forward. Only subsequent frames are recomputed — earlier frames remain unchanged.
+
+This is critical for long sequences (hundreds/thousands of frames) where errors accumulate: you can fix frame 500 without reprocessing frames 1–499.
 
 ### Model Configuration
 
@@ -210,10 +275,14 @@ Mask_generater/
 ├── controllers/                   # MVC controllers
 │   ├── app_state.py               # Central state manager (signals)
 │   ├── annotation_controller.py   # Undo/redo command pattern
-│   ├── processing_controller.py   # SAM2 processing workers
+│   ├── processing_controller.py   # SAM2 processing orchestration
 │   ├── smoothing_controller.py    # Spatial/temporal smoothing workers
 │   ├── preview_controller.py      # Preprocessing preview rendering
-│   └── shape_controller.py        # Shape overlay management
+│   ├── shape_controller.py        # Shape overlay management
+│   └── workers/                   # Background QThread workers
+│       ├── processing_worker.py   # Main SAM2 propagation
+│       ├── correction_worker.py   # Mid-sequence correction
+│       └── preprocessing_save_worker.py
 ├── core/                          # Core algorithms (no GUI dependency)
 │   ├── mask_generator.py          # SAM2 video predictor wrapper
 │   ├── image_processing.py        # Unicode-safe image I/O, conversion
@@ -221,16 +290,17 @@ Mask_generater/
 │   ├── spatial_smoothing.py       # Perona-Malik anisotropic diffusion
 │   ├── temporal_smoothing.py      # 3D Gaussian temporal smoothing
 │   ├── contour_export.py          # Contour extraction (PNG/SVG)
+│   ├── annotation_config.py       # Annotation save/load
 │   └── project.py                 # Project save/load (.s2proj)
 ├── gui/                           # PyQt6 GUI layer
 │   ├── main_window.py             # Main window, menus, signal wiring
-│   ├── theme.py                   # Dark theme (colors, fonts)
-│   ├── icons.py                   # SVG icon generator
+│   ├── theme.py                   # Dark theme (colors, fonts, stylesheet)
+│   ├── icons.py                   # Inline SVG icon generator (Lucide-style)
 │   ├── panels/                    # UI panels
 │   │   ├── sidebar.py             # Switchable Processing / Post-Processing sidebar
-│   │   ├── canvas_area.py         # Triple-view canvas (Original | Mask | Overlay)
-│   │   ├── canvas_panel.py        # Individual canvas with annotations
-│   │   ├── toolbar.py             # Tool selection toolbar
+│   │   ├── canvas_area.py         # Triple-view canvas with zoom bar
+│   │   ├── canvas_panel.py        # Individual canvas with annotations & grid
+│   │   ├── toolbar.py             # Tool selection + correction toolbar
 │   │   ├── frame_navigator.py     # Frame slider, bookmarks, navigation
 │   │   ├── filmstrip.py           # Thumbnail strip with lazy loading
 │   │   └── status_bar.py          # Status, progress bar, VRAM, timer
@@ -241,16 +311,17 @@ Mask_generater/
 │   │   ├── select_field.py        # Dropdown selector
 │   │   ├── collapsible_section.py # Collapsible panel section
 │   │   ├── hover_popup_button.py  # Category button with popup panel
-│   │   └── shape_drawing.py       # Shape drawing tools
+│   │   └── shape_drawing.py       # Interactive shape drawing tools
 │   └── dialogs/                   # Modal dialogs
 │       ├── batch_dialog.py        # Batch processing queue
-│       ├── welcome_dialog.py      # First-run welcome
+│       ├── welcome_dialog.py      # First-run welcome screen
 │       └── shortcuts_dialog.py    # Keyboard shortcuts reference
 ├── utils/
 │   └── device_manager.py          # GPU detection, VRAM monitoring
 ├── sam2/                          # Meta SAM2 model code
 ├── checkpoints/                   # Model weights (not tracked in git)
 ├── tests/                         # Test suite (232 tests)
+├── assets/                        # Demo videos and screenshots
 ├── docs/
 │   └── USER_MANUAL.md             # Detailed user manual
 └── requirements.txt
@@ -276,6 +347,24 @@ Key design decisions:
 
 ---
 
+## What Makes This Different from SAM2 / YOLO?
+
+| | SAM2 Official | YOLO Series | SAM2 Studio |
+|---|---|---|---|
+| **Interface** | Jupyter Notebook / Python API | CLI / Python API | Full desktop GUI |
+| **Preprocessing** | None | Basic augmentation | 28-parameter pipeline with 7 presets |
+| **Video Propagation** | Yes (code-only) | No (single-frame) | Yes (GUI + correction) |
+| **Mid-Sequence Fix** | Manual code | N/A | 2-click Fix & Propagate |
+| **Spatial Smoothing** | No | No | Perona-Malik anisotropic diffusion |
+| **Temporal Smoothing** | No | No | 3D Gaussian + bad-frame detection |
+| **Training Required** | No | Yes (custom dataset) | No (zero-shot) |
+| **Project Save** | No | No | Full workspace persistence |
+| **Export** | Code-only | Code-only | TIFF/PNG masks + PNG/SVG contours |
+
+**In short**: SAM2 official gives you a model. YOLO gives you a detection framework. SAM2 Studio gives you an **end-to-end desktop tool** for DIC/ROI mask generation — from preprocessing to annotation to inference to post-processing to export, all through a GUI with zero code required.
+
+---
+
 ## Performance Tips
 
 - **Use GPU** — CUDA gives ~100x speedup over CPU for mask propagation.
@@ -296,9 +385,7 @@ Key design decisions:
 | `Cannot find primary config` | Ensure `sam2/configs/` directory exists with `.yaml` files. |
 | Masks look blocky | Expected from auto-downsampling. Add more annotation points for better coverage. |
 | Chinese/Unicode characters in file path cause errors | The app uses Unicode-safe I/O. Ensure you are running the latest version. |
-| Processing completes but masks don't display | Click any frame to reload, or restart the app. Check the output `masks/` directory for files. |
-| Smoothing has no visible effect | Ensure "Replace original masks" is checked, or navigate to the smoothed output directory. After v2.0, masks auto-reload on smoothing completion. |
-| App window too small / panels overlap | Resize the window. Sidebar is fixed at 300px width. |
+| Smoothing has no visible effect | Use the "Viewing Masks From" selector to switch to the smoothed output. |
 | Model weights not found | Place `.pt` files in `checkpoints/` at the project root. File names must match exactly (see Step 3). |
 
 ---
@@ -309,13 +396,13 @@ After processing, the output directory contains:
 
 ```
 output/
-├── run_YYYYMMDD_HHMMSS/         # Timestamped run folder
-│   ├── converted_png/            # SAM2 input images (auto-converted)
-│   ├── masks/                    # Generated binary masks (TIFF or PNG)
-│   ├── overlays/                 # Optional overlay images (if enabled)
-│   ├── mask_spatial_smoothing/   # Spatially smoothed masks (if applied)
-│   ├── mask_temporal_smoothing/  # Temporally smoothed masks (if applied)
-│   └── preprocessed/            # Preprocessed images (if saved)
+├── converted_png/                # SAM2 input images (auto-converted)
+├── masks/                        # Generated binary masks (TIFF or PNG)
+├── overlays/                     # Optional overlay images (if enabled)
+├── mask_spatial_smoothing/       # Spatially smoothed masks (if applied)
+├── mask_temporal_smoothing/      # Temporally smoothed masks (if applied)
+├── preprocessed/                 # Preprocessed images (if saved)
+└── processing_summary.json       # Processing parameters and timing
 ```
 
 ---
