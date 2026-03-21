@@ -4,12 +4,12 @@ A professional desktop application for automatic mask generation in Digital Imag
 Powered by [Meta SAM2](https://github.com/facebookresearch/sam2) with a full-featured PyQt6 GUI.
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/cavi_demo.mp4" width="100%" autoplay loop muted playsinline>
-    Your browser does not support the video tag.
-  </video>
+  <a href="assets/cavi_demo.mp4">
+    <img src="assets/Mask_generator_demo_video.gif" alt="SAM2 Studio Demo" width="90%">
+  </a>
 </p>
 
-> Upload `assets/cavi_demo.mp4` to your GitHub repo's assets (drag into an issue/PR) and replace the `src` URL above with the generated link.
+<p align="center"><em>Click the preview above to view the full demo video</em></p>
 
 ---
 
