@@ -209,7 +209,7 @@ class TestMainWindow:
         from gui.main_window import MainWindow
         window = MainWindow()
         assert window is not None
-        assert window.windowTitle() == "SAM2 Studio"
+        assert window.windowTitle() == "DIC Mask Generator"
 
     def test_panels_accessible(self, qapp):
         from gui.main_window import MainWindow

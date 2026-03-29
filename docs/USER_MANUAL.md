@@ -1,4 +1,4 @@
-# SAM2 Studio v2.0 — User Manual
+# DIC Mask Generator v2.0 — User Manual
 
 ## Table of Contents
 
@@ -23,7 +23,7 @@
 
 ### First Launch
 
-When you launch SAM2 Studio for the first time, a **Welcome Dialog** appears explaining the basic workflow. The application opens with an empty workspace in the `INIT` state.
+When you launch DIC Mask Generator for the first time, a **Welcome Dialog** appears explaining the basic workflow. The application opens with an empty workspace in the `INIT` state.
 
 ### Minimum Setup
 
@@ -554,7 +554,7 @@ The export processes all masks in the output `masks/` directory and creates a ne
 | Item | Shortcut | Description |
 |------|----------|-------------|
 | Keyboard Shortcuts | `F1` | Show shortcuts reference dialog |
-| About SAM2 Studio | — | Version and attribution info |
+| About DIC Mask Generator | — | Version and attribution info |
 
 ---
 

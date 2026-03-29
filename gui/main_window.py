@@ -47,7 +47,7 @@ logger = logging.getLogger("sam2studio.main_window")
 
 
 class MainWindow(QMainWindow):
-    """Main application window for SAM2 Studio.
+    """Main application window for DIC Mask Generator.
 
     When instantiated without controllers (e.g. in tests), builds the
     layout only. When controllers are provided, wires all signals.
@@ -78,7 +78,7 @@ class MainWindow(QMainWindow):
         # Changes when smoothing outputs to a separate directory
         self._active_mask_subdir: str = "masks"
 
-        self.setWindowTitle("SAM2 Studio")
+        self.setWindowTitle("DIC Mask Generator")
         self.setMinimumSize(1200, 700)
 
         # Application icon
@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
 
         help_menu.addSeparator()
 
-        about_action = QAction("About SAM2 Studio", self)
+        about_action = QAction("About DIC Mask Generator", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
 
@@ -595,8 +595,8 @@ class MainWindow(QMainWindow):
         """Show about dialog."""
         QMessageBox.about(
             self,
-            "About SAM2 Studio",
-            "<h3>SAM2 Studio v2.0</h3>"
+            "About DIC Mask Generator",
+            "<h3>DIC Mask Generator v2.0</h3>"
             "<p>Mask Generator for DIC & ROI Recognition</p>"
             "<p>Built with PyQt6 + Meta SAM2</p>"
             "<p>Powered by Segment Anything Model 2</p>",
@@ -1207,7 +1207,7 @@ class MainWindow(QMainWindow):
         filepath, _ = QFileDialog.getSaveFileName(
             self, "Save Project",
             os.path.join(self._state.output_dir or "", "project.s2proj"),
-            "SAM2 Studio Project (*.s2proj)",
+            "DIC Mask Generator Project (*.s2proj)",
         )
         if not filepath:
             return
@@ -1228,7 +1228,7 @@ class MainWindow(QMainWindow):
 
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Open Project", "",
-            "SAM2 Studio Project (*.s2proj)",
+            "DIC Mask Generator Project (*.s2proj)",
         )
         if not filepath:
             return

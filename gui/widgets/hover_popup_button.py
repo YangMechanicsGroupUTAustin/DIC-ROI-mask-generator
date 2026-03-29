@@ -1,4 +1,4 @@
-"""Hover popup button widget for SAM2 Studio.
+"""Hover popup button widget for DIC Mask Generator.
 
 A button that shows a floating popup panel on hover, used to group
 preprocessing controls or other settings into a compact dropdown.

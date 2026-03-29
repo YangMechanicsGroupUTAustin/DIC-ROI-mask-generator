@@ -68,7 +68,7 @@ def _create_logo_header() -> QWidget:
     text_layout.setContentsMargins(0, 0, 0, 0)
     text_layout.setSpacing(0)
 
-    title = QLabel("SAM2 Studio")
+    title = QLabel("DIC Mask Generator")
     title.setStyleSheet(
         f"color: white; font-size: {Fonts.SIZE_LG}px; "
         f"font-weight: 600; background: transparent; border: none;"
@@ -978,7 +978,7 @@ class Sidebar(QWidget):
 
         # Version footer
         version_label = QLabel(
-            f"SAM2 Studio v2.0.0 | PyTorch {_get_pytorch_version()}"
+            f"DIC Mask Generator v2.0.0 | PyTorch {_get_pytorch_version()}"
         )
         version_label.setStyleSheet(
             f"color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_SM}px; "

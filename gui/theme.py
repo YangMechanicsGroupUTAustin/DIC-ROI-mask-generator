@@ -1,4 +1,4 @@
-"""Dark theme stylesheet system for SAM2 Studio.
+"""Dark theme stylesheet system for DIC Mask Generator.
 
 Color palette derived from Figma reference design.
 All colors, fonts, and QSS styling defined here.

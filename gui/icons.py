@@ -1,4 +1,4 @@
-"""SVG icon system for SAM2 Studio.
+"""SVG icon system for DIC Mask Generator.
 
 Provides inline SVG icons rendered as QIcon/QPixmap.
 Based on Lucide icon set (MIT license).

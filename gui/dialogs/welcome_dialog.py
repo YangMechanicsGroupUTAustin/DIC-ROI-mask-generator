@@ -39,7 +39,7 @@ class WelcomeDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Welcome to SAM2 Studio")
+        self.setWindowTitle("Welcome to DIC Mask Generator")
         self.setMinimumWidth(520)
         self.setStyleSheet(
             f"QDialog {{ background: {Colors.BG_MEDIUM}; "
@@ -51,7 +51,7 @@ class WelcomeDialog(QDialog):
         layout.setContentsMargins(32, 24, 32, 24)
 
         # Title
-        title = QLabel("Welcome to SAM2 Studio")
+        title = QLabel("Welcome to DIC Mask Generator")
         title.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; font-size: 22px; "
             f"font-weight: 700; background: transparent;"

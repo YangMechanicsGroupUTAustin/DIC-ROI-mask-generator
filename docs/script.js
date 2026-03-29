@@ -1,5 +1,5 @@
 /* ══════════════════════════════════════════════════
-   SAM2 Studio — Website Scripts
+   DIC Mask Generator — Website Scripts
    ══════════════════════════════════════════════════ */
 
 (function () {

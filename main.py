@@ -1,4 +1,4 @@
-"""SAM2 Studio v2.0 -- Entry Point.
+"""DIC Mask Generator v2.0 -- Entry Point.
 
 Creates all controllers, configures device detection and VRAM monitoring,
 then launches the main window with full signal wiring.
@@ -86,7 +86,7 @@ def _create_vram_timer(state: AppState, status_bar) -> QTimer:
 def main():
     """Application entry point."""
     _configure_logging()
-    logger.info("Starting SAM2 Studio v2.0")
+    logger.info("Starting DIC Mask Generator v2.0")
 
     # Enable high DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -94,7 +94,7 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("SAM2 Studio")
+    app.setApplicationName("DIC Mask Generator")
     app.setApplicationVersion("2.0.0")
     app.setStyleSheet(generate_stylesheet())
 
@@ -143,7 +143,7 @@ def main():
         welcome = WelcomeDialog(window)
         welcome.exec()
 
-    logger.info("SAM2 Studio ready")
+    logger.info("DIC Mask Generator ready")
     sys.exit(app.exec())
 
 

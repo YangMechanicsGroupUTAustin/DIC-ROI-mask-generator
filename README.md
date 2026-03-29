@@ -1,4 +1,4 @@
-# SAM2 Studio — Mask Generator for DIC & ROI Recognition
+# DIC Mask Generator — Mask Generator for DIC & ROI Recognition
 
 [![Website](https://img.shields.io/badge/Website-DIC%20Mask%20Generator-6366f1?style=for-the-badge&logo=github&logoColor=white)](https://zachtong.github.io/DIC-ROI-mask-generator/)
 
@@ -6,7 +6,7 @@ A professional desktop application for automatic mask generation in Digital Imag
 Powered by [Meta SAM2](https://github.com/facebookresearch/sam2) with a full-featured PyQt6 GUI.
 
 <p align="center">
-  <img src="assets/cavi_demo.gif" alt="SAM2 Studio Demo" width="90%">
+  <img src="assets/cavi_demo.gif" alt="DIC Mask Generator Demo" width="90%">
 </p>
 
 ---
@@ -329,7 +329,7 @@ Mask_generater/
 
 ## Architecture
 
-SAM2 Studio uses **MVC + Signal-Driven Reactive State**:
+DIC Mask Generator uses **MVC + Signal-Driven Reactive State**:
 
 - **AppState** — Single source of truth. All state changes emit PyQt6 signals.
 - **Controllers** — Modify state through AppState methods. Background work runs in QThread workers.
@@ -347,7 +347,7 @@ Key design decisions:
 
 ## What Makes This Different from SAM2 / YOLO?
 
-| | SAM2 Official | YOLO Series | SAM2 Studio |
+| | SAM2 Official | YOLO Series | DIC Mask Generator |
 |---|---|---|---|
 | **Interface** | Jupyter Notebook / Python API | CLI / Python API | Full desktop GUI |
 | **Preprocessing** | None | Basic augmentation | 28-parameter pipeline with 7 presets |
@@ -359,7 +359,7 @@ Key design decisions:
 | **Project Save** | No | No | Full workspace persistence |
 | **Export** | Code-only | Code-only | TIFF/PNG masks + PNG/SVG contours |
 
-**In short**: SAM2 official gives you a model. YOLO gives you a detection framework. SAM2 Studio gives you an **end-to-end desktop tool** for DIC/ROI mask generation — from preprocessing to annotation to inference to post-processing to export, all through a GUI with zero code required.
+**In short**: SAM2 official gives you a model. YOLO gives you a detection framework. DIC Mask Generator gives you an **end-to-end desktop tool** for DIC/ROI mask generation — from preprocessing to annotation to inference to post-processing to export, all through a GUI with zero code required.
 
 ---
 
