@@ -1,5 +1,7 @@
 # SAM2 Studio — Mask Generator for DIC & ROI Recognition
 
+[![Website](https://img.shields.io/badge/Website-DIC%20Mask%20Generator-6366f1?style=for-the-badge&logo=github&logoColor=white)](https://zachtong.github.io/DIC-ROI-mask-generator/)
+
 A professional desktop application for automatic mask generation in Digital Image Correlation (DIC) and Region of Interest (ROI) workflows.
 Powered by [Meta SAM2](https://github.com/facebookresearch/sam2) with a full-featured PyQt6 GUI.
 

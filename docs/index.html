@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DIC Mask Generator — Professional Mask Generation for DIC & ROI</title>
+  <meta name="description" content="DIC Mask Generator — Professional desktop application for automatic mask generation in DIC and ROI workflows. Powered by Meta SAM2 with a full PyQt6 GUI. GPU-accelerated, no code required.">
+  <meta name="keywords" content="SAM2, mask generation, DIC, digital image correlation, ROI, region of interest, segmentation, PyQt6, GPU, CUDA, image processing">
+  <meta name="author" content="Zixiang Tong">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="DIC Mask Generator — Professional Mask Generation">
+  <meta property="og:description" content="Transform Meta's SAM2 into a powerful desktop tool for DIC & ROI mask generation. No code required.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://raw.githubusercontent.com/zachtong/DIC-ROI-mask-generator/main/assets/Mask_generator_demo_video.gif">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="DIC Mask Generator — Professional Mask Generation">
+  <meta name="twitter:description" content="Transform Meta's SAM2 into a powerful desktop tool for DIC & ROI mask generation.">
+
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%236366f1'/><text x='50' y='68' font-family='Arial' font-size='50' font-weight='bold' fill='white' text-anchor='middle'>DM</svg>">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Ambient glow -->
+  <div class="glow-bg" aria-hidden="true"></div>
+
+  <!-- ── Navigation ── -->
+  <nav id="navbar">
+    <div class="nav-container">
+      <a href="#" class="nav-brand">
+        <svg width="28" height="28" viewBox="0 0 100 100" fill="none" aria-hidden="true">
+          <rect width="100" height="100" rx="20" fill="#6366f1"/>
+          <text x="50" y="68" font-family="Arial" font-size="50" font-weight="bold" fill="white" text-anchor="middle">DM
+        </svg>
+        DIC Mask Generator
+      </a>
+      <button class="nav-toggle" aria-label="Toggle navigation menu">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#demo">Demo</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#installation">Install</a>
+        <a href="#citation">Cite</a>
+        <a href="https://github.com/zachtong/DIC-ROI-mask-generator" class="nav-github" target="_blank" rel="noopener noreferrer">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── Hero ── -->
+  <section id="hero">
+    <div class="container hero-stacked">
+      <div class="hero-content" data-animate="fade-in">
+        <span class="hero-badge">Powered by Meta SAM2</span>
+        <h1>DIC <span class="text-gradient">Mask Generator</span></h1>
+        <p class="hero-subtitle">Professional Mask Generation for DIC & ROI Analysis</p>
+        <p class="hero-description">Transform Meta's Segment Anything Model 2 into a powerful desktop tool. From annotation to segmentation to post-processing &mdash; complete workflow with zero code.</p>
+        <div class="hero-actions">
+          <a href="#installation" class="btn btn-primary">
+            Get Started
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </a>
+          <a href="https://github.com/zachtong/DIC-ROI-mask-generator" class="btn btn-outline" target="_blank" rel="noopener noreferrer">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+            View on GitHub
+          </a>
+        </div>
+      </div>
+      <div class="hero-visual" data-animate="fade-in" data-delay="200">
+        <div class="hero-card">
+          <div class="window-chrome">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+            <span class="window-title">DIC Mask Generator</span>
+          </div>
+          <video src="assets/cavi_demo.mp4" autoplay muted loop playsinline preload="auto" aria-label="DIC Mask Generator demo"></video>
+        </div>
+      </div>
+    </div>
+    <div class="scroll-indicator" data-animate="fade-in" data-delay="600">
+      <span>Scroll to explore</span>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+    </div>
+  </section>
+
+  <!-- ── Features ── -->
+  <section id="features">
+    <div class="container">
+      <div class="section-header" data-animate="fade-in">
+        <span class="section-label">Capabilities</span>
+        <h2>Core Features</h2>
+        <p>Everything you need for professional mask generation, built into a single desktop application.</p>
+      </div>
+      <div class="features-grid">
+
+        <div class="feature-card" data-animate="fade-in" data-delay="0">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+          </div>
+          <h3>Interactive Annotation</h3>
+          <p>Point-based foreground/background marking with full undo/redo history. Toggle modes with a single keystroke.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-in" data-delay="80">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </div>
+          <h3>Mid-Sequence Correction</h3>
+          <p>Fix inaccurate masks on any frame and auto-propagate changes forward. No need to reprocess the entire sequence.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-in" data-delay="160">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+          </div>
+          <h3>28-Parameter Preprocessing</h3>
+          <p>Tone adjustment, smoothing, binarization, morphology, and anisotropic diffusion &mdash; with 7 built-in presets including DIC Microscopy.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-in" data-delay="240">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.912 5.813L20 10.5l-6.088 1.687L12 18l-1.912-5.813L4 10.5l6.088-1.687L12 3z"/><path d="M20 16l.75 2.25L23 19l-2.25.75L20 22l-.75-2.25L17 19l2.25-.75L20 16z"/></svg>
+          </div>
+          <h3>Smart Post-Processing</h3>
+          <p>Perona-Malik spatial smoothing and 3D Gaussian temporal smoothing with smart chaining and live mask comparison.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-in" data-delay="320">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </div>
+          <h3>GPU Accelerated</h3>
+          <p>CUDA auto-detection for NVIDIA GPUs delivers ~100x speedup over CPU processing. Real-time VRAM monitoring in status bar.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-in" data-delay="400">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          </div>
+          <h3>Project & Export</h3>
+          <p>Save complete workspaces as .s2proj files. Batch processing support. Export masks as TIFF/PNG and contours as PNG/SVG.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Demo ── -->
+  <section id="demo">
+    <div class="container">
+      <div class="section-header" data-animate="fade-in">
+        <span class="section-label">In Action</span>
+        <h2>See It In Action</h2>
+        <p>Watch the complete workflow &mdash; from interactive annotation to SAM2 mask propagation across all frames.</p>
+      </div>
+      <div class="demo-card" data-animate="fade-in" data-delay="100">
+        <div class="window-chrome">
+          <span class="dot dot-red"></span>
+          <span class="dot dot-yellow"></span>
+          <span class="dot dot-green"></span>
+          <span class="window-title">Full Application Demo</span>
+        </div>
+        <video src="assets/cavi_demo.mp4" controls muted loop playsinline preload="metadata" aria-label="DIC Mask Generator full application demo video">
+          Your browser does not support the video tag.
+        </video>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Workflow ── -->
+  <section id="workflow">
+    <div class="container">
+      <div class="section-header" data-animate="fade-in">
+        <span class="section-label">Process</span>
+        <h2>How It Works</h2>
+        <p>Five simple steps from raw images to publication-ready masks.</p>
+      </div>
+      <div class="workflow-steps" data-animate="fade-in" data-delay="100">
+
+        <div class="workflow-step">
+          <div class="step-number">1</div>
+          <div class="step-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <h4>Setup</h4>
+          <p>Select input image folder and output directory</p>
+        </div>
+
+        <div class="workflow-connector" aria-hidden="true">
+          <svg viewBox="0 0 40 12" fill="none"><path d="M0 6h32M28 1l6 5-6 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+
+        <div class="workflow-step">
+          <div class="step-number">2</div>
+          <div class="step-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
+          </div>
+          <h4>Annotate</h4>
+          <p>Place foreground & background points on the first frame</p>
+        </div>
+
+        <div class="workflow-connector" aria-hidden="true">
+          <svg viewBox="0 0 40 12" fill="none"><path d="M0 6h32M28 1l6 5-6 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+
+        <div class="workflow-step">
+          <div class="step-number">3</div>
+          <div class="step-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+          </div>
+          <h4>Process</h4>
+          <p>SAM2 propagates masks across all frames automatically</p>
+        </div>
+
+        <div class="workflow-connector" aria-hidden="true">
+          <svg viewBox="0 0 40 12" fill="none"><path d="M0 6h32M28 1l6 5-6 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+
+        <div class="workflow-step">
+          <div class="step-number">4</div>
+          <div class="step-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </div>
+          <h4>Review</h4>
+          <p>Browse results and fix masks on any frame if needed</p>
+        </div>
+
+        <div class="workflow-connector" aria-hidden="true">
+          <svg viewBox="0 0 40 12" fill="none"><path d="M0 6h32M28 1l6 5-6 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+
+        <div class="workflow-step">
+          <div class="step-number">5</div>
+          <div class="step-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </div>
+          <h4>Export</h4>
+          <p>Apply post-processing and export final masks</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Installation ── -->
+  <section id="installation">
+    <div class="container">
+      <div class="section-header" data-animate="fade-in">
+        <span class="section-label">Setup</span>
+        <h2>Get Started</h2>
+        <p>Up and running in under 5 minutes.</p>
+      </div>
+
+      <div class="install-steps">
+
+        <div class="install-card" data-animate="fade-in" data-delay="0">
+          <div class="install-step-header">
+            <span class="install-step-num">1</span>
+            <h3>Install PyTorch with CUDA</h3>
+          </div>
+          <p class="install-note">Check your NVIDIA driver version with <code>nvidia-smi</code>, then install the matching PyTorch:</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>bash</span>
+              <button class="copy-btn" data-target="code-1" aria-label="Copy code">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre id="code-1"><code># CUDA 12.8 (driver >= 570)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# CPU only (no GPU)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu</code></pre>
+          </div>
+        </div>
+
+        <div class="install-card" data-animate="fade-in" data-delay="100">
+          <div class="install-step-header">
+            <span class="install-step-num">2</span>
+            <h3>Install Dependencies</h3>
+          </div>
+          <div class="code-block">
+            <div class="code-header">
+              <span>bash</span>
+              <button class="copy-btn" data-target="code-2" aria-label="Copy code">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre id="code-2"><code>git clone https://github.com/zachtong/DIC-ROI-mask-generator.git
+cd DIC-ROI-mask-generator
+pip install -r requirements.txt</code></pre>
+          </div>
+        </div>
+
+        <div class="install-card" data-animate="fade-in" data-delay="200">
+          <div class="install-step-header">
+            <span class="install-step-num">3</span>
+            <h3>Download SAM2 Checkpoints</h3>
+          </div>
+          <p class="install-note">Download model weights from <a href="https://github.com/facebookresearch/sam2" target="_blank" rel="noopener noreferrer">facebookresearch/sam2</a> and place in <code>checkpoints/</code>:</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>directory</span>
+            </div>
+            <pre id="code-3"><code>checkpoints/
+├── sam2.1_hiera_large.pt      # Best quality (~900 MB)
+├── sam2.1_hiera_base_plus.pt  # Balanced
+├── sam2.1_hiera_small.pt      # Faster
+└── sam2.1_hiera_tiny.pt       # Fastest (~150 MB)</code></pre>
+          </div>
+          <p class="install-tip">You only need <strong>one</strong> checkpoint to get started. <code>hiera_large</code> for best quality, <code>hiera_tiny</code> for quick tests.</p>
+        </div>
+
+        <div class="install-card" data-animate="fade-in" data-delay="300">
+          <div class="install-step-header">
+            <span class="install-step-num">4</span>
+            <h3>Launch</h3>
+          </div>
+          <div class="code-block">
+            <div class="code-header">
+              <span>bash</span>
+              <button class="copy-btn" data-target="code-4" aria-label="Copy code">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre id="code-4"><code>python main.py</code></pre>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Citation ── -->
+  <section id="citation">
+    <div class="container">
+      <div class="section-header" data-animate="fade-in">
+        <span class="section-label">Reference</span>
+        <h2>Citation</h2>
+        <p>If you use DIC Mask Generator in your research, please cite our paper.</p>
+      </div>
+      <div class="citation-card" data-animate="fade-in" data-delay="100">
+        <a href="https://www.researchsquare.com/article/rs-5566473/v1" class="paper-link" target="_blank" rel="noopener noreferrer">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          View Paper on Research Square
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+        </a>
+        <div class="bibtex-block">
+          <div class="bibtex-header">
+            <span>BibTeX</span>
+            <button class="copy-btn" id="bibtex-copy" aria-label="Copy BibTeX citation">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>Copy</span>
+            </button>
+          </div>
+          <pre id="bibtex-content"><code>@article{leu2026machine,
+  title     = {Machine Learning-Aided Spatial Adaptation for Improved
+               Digital Image Correlation Analysis of Complex Geometries},
+  author    = {Leu, Jeffrey and Tong, Zixiang and Doty, Andrew and
+               Tsimpoukis, Solon and Deng, Bolei and Yang, Jin},
+  journal   = {Strain},
+  volume    = {62},
+  number    = {1},
+  pages     = {e70022},
+  year      = {2026},
+  publisher = {Wiley Online Library}
+}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Footer ── -->
+  <footer>
+    <div class="container">
+      <div class="footer-content">
+        <div class="footer-brand">
+          <span class="footer-logo">
+            <svg width="24" height="24" viewBox="0 0 100 100" fill="none" aria-hidden="true">
+              <rect width="100" height="100" rx="20" fill="#6366f1"/>
+              <text x="50" y="68" font-family="Arial" font-size="50" font-weight="bold" fill="white" text-anchor="middle">DM
+            </svg>
+            DIC Mask Generator
+          </span>
+          <p>Yang Mechanics Group &middot; The University of Texas at Austin</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/zachtong/DIC-ROI-mask-generator" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://www.researchsquare.com/article/rs-5566473/v1" target="_blank" rel="noopener noreferrer">Paper</a>
+          <a href="https://github.com/zachtong/DIC-ROI-mask-generator/blob/main/docs/USER_MANUAL.md" target="_blank" rel="noopener noreferrer">Documentation</a>
+        </div>
+      </div>
+      <div class="footer-divider"></div>
+      <div class="footer-bottom">
+        <p>&copy; 2025 Zixiang Tong. MIT License. SAM2 model by Meta AI (Apache 2.0).</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
