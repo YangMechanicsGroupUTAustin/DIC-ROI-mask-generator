@@ -245,7 +245,8 @@ def generate_stylesheet() -> str:
         border: none;
     }}
     QComboBox QAbstractItemView::item:hover {{
-        background-color: rgba(255, 255, 255, 0.05);
+        background-color: #262832;
+        color: {c.TEXT_PRIMARY};
     }}
     QComboBox QAbstractItemView::item:selected {{
         background-color: {c.PRIMARY_BG};
