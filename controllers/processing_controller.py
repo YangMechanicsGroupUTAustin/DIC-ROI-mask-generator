@@ -81,6 +81,9 @@ class ProcessingController(QObject):
 
         model_cfg, checkpoint = self._state.get_model_config()
 
+        # Convert UI 1-based anchor frame to internal 0-based for the worker.
+        refine_anchor_zero_based = max(0, self._state.refine_anchor_frame - 1)
+
         worker = ProcessingWorker(
             mask_generator=self._mask_generator,
             image_files=self._state.image_files,
@@ -98,14 +101,32 @@ class ProcessingController(QObject):
             preprocessing_config=self._state.preprocessing_config,
             skip_existing=skip_existing,
             mask_output_format=self._state.mask_output_format,
+            refine_enabled=self._state.refine_enabled,
+            refine_anchor_frame=refine_anchor_zero_based,
+            refine_overwrite_count=self._state.refine_overwrite_count,
         )
         self._connect_worker(worker)
         self._worker = worker
         worker.start()
         logger.info("Processing started")
 
-    def start_correction(self, frame_idx: int, points: list, labels: list) -> None:
-        """Start correction re-propagation from a specific frame."""
+    def start_correction(
+        self,
+        anchor_frame_idx: int,
+        range_start: int,
+        range_end: int,
+        points: list,
+        labels: list,
+    ) -> None:
+        """Start range-based correction re-propagation.
+
+        Args:
+            anchor_frame_idx: 0-based frame where correction points are placed.
+            range_start: 0-based inclusive range start.
+            range_end: 0-based inclusive range end.
+            points: [[x, y], ...] in original image coordinates.
+            labels: [1 | 0, ...] — foreground/background per point.
+        """
         if self.is_running:
             logger.warning("Processing already in progress")
             return
@@ -118,7 +139,9 @@ class ProcessingController(QObject):
 
         worker = CorrectionWorker(
             mask_generator=self._mask_generator,
-            frame_idx=frame_idx,
+            anchor_frame_idx=anchor_frame_idx,
+            range_start=range_start,
+            range_end=range_end,
             points=points,
             labels=labels,
             threshold=self._state.threshold,
@@ -130,7 +153,10 @@ class ProcessingController(QObject):
         self._connect_worker(worker)
         self._worker = worker
         worker.start()
-        logger.info(f"Correction started from frame {frame_idx}")
+        logger.info(
+            "Correction started: anchor=%d range=[%d, %d]",
+            anchor_frame_idx, range_start, range_end,
+        )
 
     def start_save_preprocessed(
         self, config: PreprocessingConfig,

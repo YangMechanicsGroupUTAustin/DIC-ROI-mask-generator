@@ -57,6 +57,9 @@ class ProcessingWorker(QThread):
         preprocessing_config: PreprocessingConfig | None = None,
         skip_existing: bool = False,
         mask_output_format: str = "TIFF (default)",
+        refine_enabled: bool = False,
+        refine_anchor_frame: int = 0,      # 0-based
+        refine_overwrite_count: int = 0,   # K, count of earliest frames
         parent=None,
     ):
         super().__init__(parent)
@@ -77,6 +80,13 @@ class ProcessingWorker(QThread):
         self._preprocessing_config = preprocessing_config or PreprocessingConfig()
         self._skip_existing = skip_existing
         self._mask_ext = ".png" if "PNG" in mask_output_format else ".tiff"
+        # --- Early-Frame Refinement config ---
+        self._refine_enabled = bool(refine_enabled)
+        self._refine_anchor_frame = int(refine_anchor_frame)
+        self._refine_overwrite_count = int(refine_overwrite_count)
+        # Captured anchor mask (downsampled, pre-upscale) from forward pass.
+        # Populated inside _run_pipeline's on_frame callback.
+        self._captured_anchor_mask: np.ndarray | None = None
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -184,7 +194,11 @@ class ProcessingWorker(QThread):
             points_arr[:, 0] *= scale_x
             points_arr[:, 1] *= scale_y
             labels_arr = np.array(self._labels, dtype=np.int32)
-            self._mask_generator.add_points(start_idx, points_arr, labels_arr)
+            # Register as *original* conditioning so Re-run Range's
+            # reset_corrections() can rebuild this baseline.
+            self._mask_generator.add_original_points(
+                start_idx, points_arr, labels_arr,
+            )
 
         # --- Stage 4+5: Propagate, upscale, save, preview per frame ---
         if self._stop_event.is_set():
@@ -200,6 +214,15 @@ class ProcessingWorker(QThread):
             nonlocal processed_count
             if self._stop_event.is_set():
                 return
+
+            # Capture the anchor frame's downsampled mask BEFORE upscaling,
+            # so the refine stage can feed it back to SAM2 at its native
+            # internal resolution (no extra resize).
+            if (
+                self._refine_enabled
+                and frame_idx == self._refine_anchor_frame
+            ):
+                self._captured_anchor_mask = mask.copy()
 
             # Upscale mask to original resolution if downsampled
             if needs_upscale:
@@ -230,6 +253,83 @@ class ProcessingWorker(QThread):
         )
 
         logger.info(f"Processing complete: {processed_count} masks saved to {mask_dir}")
+
+        # --- Stage 6: Early-Frame Refinement (opt-in reverse pass) ---------
+        if (
+            self._refine_enabled
+            and not self._stop_event.is_set()
+            and self._captured_anchor_mask is not None
+        ):
+            self._run_refine_stage(
+                mask_dir=mask_dir,
+                needs_upscale=needs_upscale,
+                orig_w=orig_w,
+                orig_h=orig_h,
+            )
+        elif self._refine_enabled and self._captured_anchor_mask is None:
+            logger.warning(
+                "Refine stage skipped: anchor frame %d was not seen during "
+                "forward propagation (captured_anchor_mask is None)",
+                self._refine_anchor_frame,
+            )
+
+    def _run_refine_stage(
+        self,
+        mask_dir: str,
+        needs_upscale: bool,
+        orig_w: int,
+        orig_h: int,
+    ) -> None:
+        """Run the reverse-propagation refine pass over the earliest frames.
+
+        Must be called after `self._captured_anchor_mask` has been populated
+        by the forward pass. Overwrites the earliest K masks in ``mask_dir``
+        in place and emits ``frame_processed`` for each refined frame so the
+        GUI updates in real time.
+        """
+        anchor = self._refine_anchor_frame
+        k = self._refine_overwrite_count
+
+        logger.info(
+            "Starting refine stage: anchor=%d overwrite_count=%d", anchor, k,
+        )
+        self.progress.emit(
+            0, k, f"Refining first {k} frames (reverse pass)...",
+        )
+
+        def on_refine_frame(frame_idx: int, mask: np.ndarray) -> None:
+            if self._stop_event.is_set():
+                return
+
+            if needs_upscale:
+                mask = cv2.resize(
+                    mask, (orig_w, orig_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+
+            mask_path = os.path.join(
+                mask_dir, f"mask_{frame_idx:06d}{self._mask_ext}",
+            )
+            # Refine always overwrites — that's the whole point.
+            imwrite_safe(mask_path, mask)
+            self.frame_processed.emit(frame_idx, mask)
+
+        def on_refine_progress(done: int, total: int) -> None:
+            self.progress.emit(
+                done, total,
+                f"Refining frame {done}/{total} (reverse pass)",
+            )
+
+        self._mask_generator.refine_early_frames(
+            anchor_frame_idx=anchor,
+            anchor_mask=self._captured_anchor_mask,
+            overwrite_count=k,
+            threshold=self._threshold,
+            frame_callback=on_refine_frame,
+            progress_callback=on_refine_progress,
+            stop_check=self._stop_event.is_set,
+        )
+        logger.info("Refine stage complete")
 
     def _convert_images_parallel(
         self, fmt: str, ext: str, converted_dir: str, total_files: int,

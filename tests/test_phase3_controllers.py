@@ -105,6 +105,123 @@ class TestAppState:
         assert len(signals) == 1
 
 
+# --- AppState: Early-Frame Refinement settings (Phase C) ---
+
+class TestAppStateRefineSettings:
+    def test_defaults_before_images_loaded(self, state):
+        # Defaults must be safe when no images have been loaded yet.
+        assert state.refine_enabled is False
+        assert state.refine_anchor_frame == 1
+        assert state.refine_overwrite_count == 1
+
+    def test_defaults_after_images_loaded_long_sequence(self, state):
+        """Loading >=10 images should pin anchor to 10 (1-based) and K=3."""
+        state.set_image_files([f"f{i}.png" for i in range(50)])
+        assert state.refine_anchor_frame == 10
+        assert state.refine_overwrite_count == 3
+        # Enabled remains off — opt-in.
+        assert state.refine_enabled is False
+
+    def test_defaults_after_images_loaded_short_sequence(self, state):
+        """For <10 frames anchor falls back to total_frames."""
+        state.set_image_files([f"f{i}.png" for i in range(5)])
+        assert state.refine_anchor_frame == 5
+        # Overwrite default (3) still fits since anchor (5) > 3
+        assert state.refine_overwrite_count == 3
+
+    def test_defaults_tiny_sequence_clamps_overwrite(self, state):
+        """With total=2, anchor=2 and overwrite must clamp to anchor-1 = 1."""
+        state.set_image_files(["a.png", "b.png"])
+        assert state.refine_anchor_frame == 2
+        assert state.refine_overwrite_count == 1
+
+    def test_set_refine_enabled_emits(self, state):
+        signals = []
+        state.refine_enabled_changed.connect(lambda v: signals.append(v))
+        state.set_refine_enabled(True)
+        assert state.refine_enabled is True
+        assert signals == [True]
+        # No re-emit on identical value
+        state.set_refine_enabled(True)
+        assert len(signals) == 1
+
+    def test_set_refine_anchor_emits_and_clamps(self, state):
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        signals = []
+        state.refine_anchor_changed.connect(lambda v: signals.append(v))
+
+        state.set_refine_anchor_frame(15)
+        assert state.refine_anchor_frame == 15
+        assert signals[-1] == 15
+
+        # Over-high clamps to total (20)
+        state.set_refine_anchor_frame(999)
+        assert state.refine_anchor_frame == 20
+
+        # Too-low clamps to 2 (anchor must be >= 2 so there's at least one
+        # earlier frame to overwrite).
+        state.set_refine_anchor_frame(0)
+        assert state.refine_anchor_frame == 2
+
+    def test_set_refine_anchor_clamps_overwrite_down(self, state):
+        """Shrinking anchor below the current overwrite count must drag
+        overwrite down with it."""
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_refine_anchor_frame(10)
+        state.set_refine_overwrite_count(8)
+        assert state.refine_overwrite_count == 8
+
+        # Now shrink anchor below current K
+        state.set_refine_anchor_frame(3)
+        assert state.refine_anchor_frame == 3
+        # K must be <= anchor, so clamp to 3 (or anchor-1 depending on
+        # policy — we pick anchor itself, matching the core method's
+        # allowed range 1 <= K <= anchor).
+        assert state.refine_overwrite_count <= 3
+        assert state.refine_overwrite_count >= 1
+
+    def test_set_refine_overwrite_emits_and_clamps(self, state):
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_refine_anchor_frame(10)
+        signals = []
+        state.refine_overwrite_changed.connect(lambda v: signals.append(v))
+
+        state.set_refine_overwrite_count(5)
+        assert state.refine_overwrite_count == 5
+        assert signals[-1] == 5
+
+        # Over-high clamps to anchor
+        state.set_refine_overwrite_count(999)
+        assert state.refine_overwrite_count == 10
+
+        # Zero clamps up to 1
+        state.set_refine_overwrite_count(0)
+        assert state.refine_overwrite_count == 1
+
+    def test_new_image_files_resets_refine_to_defaults(self, state):
+        """Loading a fresh sequence must recompute the default anchor/K
+        so stale values from an earlier project don't leak in."""
+        state.set_image_files([f"f{i}.png" for i in range(50)])
+        state.set_refine_anchor_frame(40)
+        state.set_refine_overwrite_count(20)
+
+        # Load a shorter sequence
+        state.set_image_files([f"g{i}.png" for i in range(8)])
+        assert state.refine_anchor_frame == 8  # min(10, 8)
+        assert state.refine_overwrite_count == 3  # default
+
+    def test_enabled_flag_independent_of_anchor_clamping(self, state):
+        """Toggling enabled must not affect anchor/K and vice-versa."""
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_refine_enabled(True)
+        state.set_refine_anchor_frame(15)
+        state.set_refine_overwrite_count(5)
+
+        assert state.refine_enabled is True
+        assert state.refine_anchor_frame == 15
+        assert state.refine_overwrite_count == 5
+
+
 # --- AnnotationController Tests ---
 
 class TestAnnotationController:
@@ -179,6 +296,66 @@ class TestAnnotationController:
         for i in range(150):
             annotation_ctrl.add_point(float(i), float(i))
         assert len(annotation_ctrl._undo_stack) == annotation_ctrl.MAX_HISTORY
+
+
+# --- ProcessingController: refine params forwarding (Phase E) ----------------
+
+class TestProcessingControllerRefineForwarding:
+    """Verify ProcessingController.start_processing forwards refine state."""
+
+    def test_refine_disabled_passes_false(self, qapp, tmp_path):
+        from controllers.app_state import AppState
+        from controllers.processing_controller import ProcessingController
+        from unittest.mock import MagicMock, patch
+
+        state = AppState()
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_output_dir(str(tmp_path))
+        # Refine disabled by default
+        mg = MagicMock()
+        ctrl = ProcessingController(state, mg)
+
+        with patch(
+            "controllers.processing_controller.ProcessingWorker"
+        ) as MockWorker:
+            instance = MagicMock()
+            instance.isRunning.return_value = False
+            MockWorker.return_value = instance
+            ctrl.start_processing()
+
+        kwargs = MockWorker.call_args.kwargs
+        assert kwargs.get("refine_enabled") is False
+
+    def test_refine_enabled_forwards_anchor_and_count(
+        self, qapp, tmp_path,
+    ):
+        from controllers.app_state import AppState
+        from controllers.processing_controller import ProcessingController
+        from unittest.mock import MagicMock, patch
+
+        state = AppState()
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_output_dir(str(tmp_path))
+        state.set_refine_enabled(True)
+        state.set_refine_anchor_frame(12)
+        state.set_refine_overwrite_count(4)
+
+        mg = MagicMock()
+        ctrl = ProcessingController(state, mg)
+
+        with patch(
+            "controllers.processing_controller.ProcessingWorker"
+        ) as MockWorker:
+            instance = MagicMock()
+            instance.isRunning.return_value = False
+            MockWorker.return_value = instance
+            ctrl.start_processing()
+
+        kwargs = MockWorker.call_args.kwargs
+        assert kwargs["refine_enabled"] is True
+        # Worker takes a 0-based anchor, but AppState stores 1-based.
+        assert kwargs["refine_anchor_frame"] == 11  # 12 - 1
+        assert kwargs["refine_overwrite_count"] == 4
 
 
 # --- DeviceManager Tests ---

@@ -47,6 +47,10 @@ class AppState(QObject):
     marked_frames_changed = pyqtSignal(set)         # set of 1-based frame indices
     vram_updated = pyqtSignal(float, float)        # used_gb, total_gb
     status_message = pyqtSignal(str, str)          # message, level (ready/processing/error/warning)
+    # --- Early-Frame Refinement (Phase C) ---
+    refine_enabled_changed = pyqtSignal(bool)
+    refine_anchor_changed = pyqtSignal(int)        # 1-based anchor frame
+    refine_overwrite_changed = pyqtSignal(int)     # K: count of earliest frames
 
     # Model registry -- maps display name to (config_yaml, checkpoint_filename)
     MODEL_REGISTRY: dict[str, tuple[str, str]] = {
@@ -101,6 +105,13 @@ class AppState(QObject):
         # SAM2 runtime (managed by processing controller)
         self.predictor = None
         self.inference_state = None
+
+        # Early-Frame Refinement settings (Phase C) -- opt-in post-stage
+        # that reverse-propagates from a user-chosen anchor to overwrite
+        # the K worst early frames.
+        self._refine_enabled = False
+        self._refine_anchor_frame = 1        # 1-based; recomputed on load
+        self._refine_overwrite_count = 1     # K; recomputed on load
 
     # --- Properties with signal emission ---
 
@@ -162,6 +173,10 @@ class AppState(QObject):
             self._current_frame = 1
             self.frame_range_changed.emit(1, total)
             self.current_frame_changed.emit(1)
+        # Recompute refine defaults for the new sequence length. Does NOT
+        # touch refine_enabled -- that's a user preference, orthogonal to
+        # anchor/K.
+        self._reset_refine_defaults()
         self.image_files_changed.emit(files)
 
     @property
@@ -381,3 +396,89 @@ class AppState(QObject):
     @property
     def total_frames(self) -> int:
         return len(self._image_files)
+
+    # --- Early-Frame Refinement (Phase C) ---------------------------------
+
+    @property
+    def refine_enabled(self) -> bool:
+        return self._refine_enabled
+
+    @property
+    def refine_anchor_frame(self) -> int:
+        """1-based anchor frame from which reverse propagation starts."""
+        return self._refine_anchor_frame
+
+    @property
+    def refine_overwrite_count(self) -> int:
+        """K: number of earliest frames whose masks will be overwritten."""
+        return self._refine_overwrite_count
+
+    def set_refine_enabled(self, value: bool) -> None:
+        value = bool(value)
+        if self._refine_enabled != value:
+            self._refine_enabled = value
+            self.refine_enabled_changed.emit(value)
+
+    def set_refine_anchor_frame(self, value: int) -> None:
+        """Set the anchor frame (1-based) with clamping.
+
+        Lower bound is 2 when there are at least 2 images, so that at least
+        one earlier frame exists to overwrite. Upper bound is total_frames.
+        Cascades: if the new anchor is below the current overwrite count K,
+        K is dragged down to fit (K <= anchor is required by the core).
+        """
+        total = len(self._image_files)
+        if total >= 2:
+            lo, hi = 2, total
+        elif total == 1:
+            lo, hi = 1, 1
+        else:
+            # No images loaded yet -- refuse to budge the anchor beyond
+            # the initial default (1).
+            lo, hi = 1, 1
+        value = max(lo, min(int(value), hi))
+        if self._refine_anchor_frame != value:
+            self._refine_anchor_frame = value
+            self.refine_anchor_changed.emit(value)
+        # Cascade K to satisfy K <= anchor.
+        if self._refine_overwrite_count > value:
+            new_k = max(1, value)
+            if new_k != self._refine_overwrite_count:
+                self._refine_overwrite_count = new_k
+                self.refine_overwrite_changed.emit(new_k)
+
+    def set_refine_overwrite_count(self, value: int) -> None:
+        """Set the overwrite count K with clamping to [1, anchor]."""
+        anchor = self._refine_anchor_frame
+        lo, hi = 1, max(1, anchor)
+        value = max(lo, min(int(value), hi))
+        if self._refine_overwrite_count != value:
+            self._refine_overwrite_count = value
+            self.refine_overwrite_changed.emit(value)
+
+    def _reset_refine_defaults(self) -> None:
+        """Recompute default anchor/K for the current sequence length.
+
+        Policy:
+            anchor = min(10, total_frames)   (or 1 if no images)
+            K      = max(1, min(3, anchor-1))
+                     -- prefer 3, but default keeps K strictly below anchor
+                     -- so the anchor frame's own mask stays intact by default.
+
+        Leaves refine_enabled untouched -- that's a user preference.
+        """
+        total = len(self._image_files)
+        if total <= 0:
+            new_anchor = 1
+            new_k = 1
+        else:
+            new_anchor = min(10, total)
+            # For anchor=1 (total=1), (anchor-1)=0 -> max(1,0)=1.
+            new_k = max(1, min(3, new_anchor - 1))
+
+        if self._refine_anchor_frame != new_anchor:
+            self._refine_anchor_frame = new_anchor
+            self.refine_anchor_changed.emit(new_anchor)
+        if self._refine_overwrite_count != new_k:
+            self._refine_overwrite_count = new_k
+            self.refine_overwrite_changed.emit(new_k)

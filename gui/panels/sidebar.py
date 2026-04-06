@@ -108,6 +108,10 @@ class Sidebar(QWidget):
     format_changed = pyqtSignal(str)
     mask_format_changed = pyqtSignal(str)
     threshold_changed = pyqtSignal(float)
+    # --- Early-Frame Refinement (Phase D) ---
+    refine_enabled_changed = pyqtSignal(bool)
+    refine_anchor_changed = pyqtSignal(int)         # 1-based anchor
+    refine_overwrite_changed = pyqtSignal(int)      # K
     preprocessing_preview_requested = pyqtSignal(object)  # PreprocessingConfig
     save_preprocessed_requested = pyqtSignal(object)      # PreprocessingConfig
     shape_draw_requested = pyqtSignal(str, str)            # mode, shape_type
@@ -755,6 +759,66 @@ class Sidebar(QWidget):
 
         scroll_layout.addWidget(model_section)
 
+        # --- Early-Frame Refinement section (Phase D) ---
+        # Reverse-propagation post-stage that overwrites the K worst early
+        # frames using a chosen mid-sequence anchor as the seed mask.
+        # Default-collapsed and disabled — opt-in feature.
+        self._refine_section = CollapsibleSection(
+            "Early-Frame Refinement",
+            icon_name="rotate-ccw",
+            default_open=False,
+        )
+
+        self._refine_enabled_check = QCheckBox("Enable Early-Frame Refinement")
+        self._refine_enabled_check.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
+            f"background: transparent;"
+        )
+        self._refine_enabled_check.setToolTip(
+            "Run a reverse-propagation pass after the forward pass to "
+            "improve the worst early frames.\n"
+            "Uses a mid-sequence anchor frame as the seed mask, then walks "
+            "backwards to frame 0,\n"
+            "overwriting only the earliest K frames."
+        )
+        self._refine_enabled_check.toggled.connect(
+            self.refine_enabled_changed.emit
+        )
+        self._refine_section.add_widget(self._refine_enabled_check)
+
+        self._refine_anchor_input = NumberInput(
+            "Anchor Frame",
+            default=10, min_val=2, max_val=99999,
+            step=1, decimals=0, icon_name="target",
+            tooltip=(
+                "1-based index of the frame whose mask is used as the "
+                "reverse-pass seed.\nDefault: min(10, total_frames). "
+                "Pick a frame where the forward mask is already accurate."
+            ),
+        )
+        self._refine_anchor_input.value_changed.connect(
+            lambda v: self.refine_anchor_changed.emit(int(v))
+        )
+        self._refine_section.add_widget(self._refine_anchor_input)
+
+        self._refine_overwrite_input = NumberInput(
+            "Overwrite Count (K)",
+            default=3, min_val=1, max_val=99999,
+            step=1, decimals=0, icon_name="layers",
+            tooltip=(
+                "How many of the EARLIEST frames (frames 0 .. K-1) get "
+                "their masks overwritten\nby the reverse pass. The reverse "
+                "walk still traverses anchor -> 0 internally so SAM2's "
+                "memory bank has full context."
+            ),
+        )
+        self._refine_overwrite_input.value_changed.connect(
+            lambda v: self.refine_overwrite_changed.emit(int(v))
+        )
+        self._refine_section.add_widget(self._refine_overwrite_input)
+
+        scroll_layout.addWidget(self._refine_section)
+
         # End of processing page — add spacer and finalize
         scroll_layout.addStretch()
         scroll.setWidget(scroll_content)
@@ -1197,6 +1261,51 @@ class Sidebar(QWidget):
     def set_output_path(self, path: str, emit_signal: bool = True) -> None:
         """Set output directory path."""
         self._output_path.set_path(path, emit_signal=emit_signal)
+
+    # ---- Early-Frame Refinement (Phase D) --------------------------------
+    # Programmatic setters used to mirror AppState into the UI without
+    # echoing signals back. They block signals on the underlying widget so
+    # the AppState <-> Sidebar binding doesn't form a loop.
+
+    def set_refine_enabled(self, enabled: bool) -> None:
+        """Set the refine-enabled checkbox without emitting a signal."""
+        self._refine_enabled_check.blockSignals(True)
+        try:
+            self._refine_enabled_check.setChecked(bool(enabled))
+        finally:
+            self._refine_enabled_check.blockSignals(False)
+
+    def set_refine_anchor_frame(self, frame: int) -> None:
+        """Set the anchor frame value without emitting a signal."""
+        # NumberInput.set_value() already blocks signals on its spinbox.
+        self._refine_anchor_input.set_value(int(frame))
+
+    def set_refine_overwrite_count(self, count: int) -> None:
+        """Set the overwrite-count value without emitting a signal."""
+        self._refine_overwrite_input.set_value(int(count))
+
+    def set_refine_max_anchor(self, max_value: int) -> None:
+        """Update the upper bound of the anchor spinbox.
+
+        Called when the loaded sequence length changes so the user can't
+        pick an anchor past the last frame.
+        """
+        self._refine_anchor_input._spinbox.blockSignals(True)
+        try:
+            self._refine_anchor_input._spinbox.setMaximum(int(max_value))
+        finally:
+            self._refine_anchor_input._spinbox.blockSignals(False)
+
+    def set_refine_max_overwrite(self, max_value: int) -> None:
+        """Update the upper bound of the overwrite-count spinbox.
+
+        Called whenever the anchor changes (since K must satisfy K <= anchor).
+        """
+        self._refine_overwrite_input._spinbox.blockSignals(True)
+        try:
+            self._refine_overwrite_input._spinbox.setMaximum(int(max_value))
+        finally:
+            self._refine_overwrite_input._spinbox.blockSignals(False)
 
     def get_preprocessing_config(self):
         """Build PreprocessingConfig from current sidebar values."""

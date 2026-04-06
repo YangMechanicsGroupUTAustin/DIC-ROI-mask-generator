@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from controllers.correction_controller import CorrectionController
 from controllers.manual_edit_controller import ManualEditController
 from gui.icons import get_icon
 from gui.panels.canvas_area import CanvasArea
@@ -73,6 +74,15 @@ class MainWindow(QMainWindow):
         self._smoothing = smoothing_controller
         self._shape_ctrl = shape_controller
         self._preview_ctrl = preview_controller
+
+        # Range-based correction state machine (Phase B). Owned by MainWindow
+        # so we can always ask "is this point allowed?" before forwarding a
+        # click to the annotation controller.
+        self._corr_ctrl = CorrectionController(self)
+        # Flag so that the next `processing_finished` knows it closed a
+        # correction run (not a full Start Processing run) and should go
+        # back to REVIEWING / clean up correction state.
+        self._correction_run_in_progress: bool = False
 
         # Previous tool before entering shape draw mode (to restore on cancel)
         self._tool_before_shape: str = "select"
@@ -706,6 +716,25 @@ class MainWindow(QMainWindow):
         )
         self._sidebar.threshold_changed.connect(state.set_threshold)
 
+        # --- Early-Frame Refinement: bidirectional Sidebar <-> AppState ---
+        # Sidebar -> AppState (user-driven)
+        self._sidebar.refine_enabled_changed.connect(
+            state.set_refine_enabled
+        )
+        self._sidebar.refine_anchor_changed.connect(
+            state.set_refine_anchor_frame
+        )
+        self._sidebar.refine_overwrite_changed.connect(
+            state.set_refine_overwrite_count
+        )
+        # AppState -> Sidebar (programmatic, e.g. after image_files load).
+        # Sidebar setters block their widgets' signals, so this won't loop.
+        state.refine_enabled_changed.connect(self._sidebar.set_refine_enabled)
+        state.refine_anchor_changed.connect(self._on_refine_anchor_changed)
+        state.refine_overwrite_changed.connect(
+            self._sidebar.set_refine_overwrite_count
+        )
+
         self._sidebar.preprocessing_preview_requested.connect(
             self._on_preview_preprocessing
         )
@@ -803,13 +832,27 @@ class MainWindow(QMainWindow):
         self._toolbar.apply_correction_requested.connect(
             self._on_apply_correction
         )
+        # Toolbar spin boxes → controller (user-driven range edits)
+        self._toolbar.correction_range_changed.connect(
+            self._corr_ctrl.set_range
+        )
+        # Controller → toolbar (echo back so set_total_frames / clamping
+        # are reflected in the UI). Uses the signal-suppression guard
+        # inside set_correction_range to avoid a feedback loop.
+        self._corr_ctrl.range_changed.connect(
+            self._toolbar.set_correction_range
+        )
         self._toolbar.force_reprocess_changed.connect(
             state.set_force_reprocess
         )
 
         # --- Canvas area signals ---
         if annotation is not None:
-            self._canvas_area.point_added.connect(annotation.add_point)
+            # Intercept point-add so CorrectionController can reject clicks
+            # that fall on non-anchor frames during CORRECTION mode.
+            self._canvas_area.point_added.connect(
+                self._on_canvas_point_added
+            )
             self._canvas_area.point_moved.connect(annotation.move_point)
             self._canvas_area.point_removed.connect(annotation.remove_point)
 
@@ -1022,6 +1065,12 @@ class MainWindow(QMainWindow):
         elif current == AppState.State.POST_PROCESSING:
             self._on_stop_processing()
         elif current == AppState.State.CORRECTION:
+            # Clear the anchor + any pending correction points before
+            # leaving the state — otherwise the next "Add Correction"
+            # would inherit stale points.
+            if self._annotation is not None:
+                self._annotation.clear_points()
+            self._corr_ctrl.on_exit_correction()
             self._state.set_state(AppState.State.REVIEWING)
 
     # --- State-dependent UI enablement ---
@@ -1073,6 +1122,8 @@ class MainWindow(QMainWindow):
         # Correction buttons
         self._toolbar._add_correction_btn.setEnabled(is_reviewing)
         self._toolbar._apply_correction_btn.setEnabled(is_correction)
+        # Range spin boxes: editable only while composing a correction
+        self._toolbar.set_correction_range_enabled(is_correction)
         self._toolbar._force_reprocess.setEnabled(not is_busy)
 
         # Frame navigator
@@ -1214,7 +1265,6 @@ class MainWindow(QMainWindow):
             return
         # Block if SAM2 model is not loaded
         if self._processing is not None:
-            from core.mask_generator import MaskGenerator
             mg = self._processing._mask_generator
             if not mg.is_initialized:
                 self._show_error(
@@ -1223,28 +1273,76 @@ class MainWindow(QMainWindow):
                     "Run full processing first to initialize the model.",
                 )
                 return
+
+        # Start with a clean slate: drop any leftover annotation points so
+        # the user doesn't accidentally feed them into a correction run.
+        if self._annotation is not None:
+            self._annotation.clear_points()
+
+        # Seed the correction controller with the current frame (1-based)
+        # and total frames. The default range is [current, current].
+        total = max(1, len(self._state.image_files))
+        self._corr_ctrl.on_enter_correction(
+            current_frame=self._state.current_frame,
+            total_frames=total,
+        )
+
         self._state.set_state(self._state.State.CORRECTION)
 
+    def _on_canvas_point_added(self, x: float, y: float) -> None:
+        """Forward canvas clicks to the annotation controller, with
+        correction-mode gating.
+
+        When the user is in CORRECTION mode, the first dropped point locks
+        the anchor frame. Subsequent points on other frames are rejected
+        via a toast on the status bar (we don't silently drop them).
+        """
+        if self._annotation is None:
+            return
+
+        from controllers.app_state import AppState
+        if self._state.state == AppState.State.CORRECTION:
+            if not self._corr_ctrl.try_add_point(self._state.current_frame):
+                self._status_bar.set_status(
+                    f"Points can only be added on anchor frame "
+                    f"{self._corr_ctrl.anchor_frame}. "
+                    f"Navigate there or clear the anchor.",
+                    "error",
+                )
+                return
+
+        self._annotation.add_point(x, y)
+
     def _on_apply_correction(self) -> None:
-        """Apply correction from the current frame with current points."""
+        """Apply correction over the selected range."""
         if self._processing is None:
             return
 
-        if not self._state.points:
+        if not self._corr_ctrl.can_apply(len(self._state.points)):
             self._show_error(
                 "Cannot Apply Correction",
-                "No annotation points. Add correction points first.",
+                "Need at least one correction point on a valid anchor frame "
+                "that sits inside the selected range.",
             )
             return
 
-        # current_frame is 1-based, correction needs 0-based
-        frame_idx = self._state.current_frame - 1
+        anchor_1b = self._corr_ctrl.anchor_frame
+        start_1b = self._corr_ctrl.range_start
+        end_1b = self._corr_ctrl.range_end
 
+        # UI is 1-based (frame navigator, range spins); SAM2 is 0-based.
+        anchor_0b = int(anchor_1b) - 1
+        start_0b = int(start_1b) - 1
+        end_0b = int(end_1b) - 1
+
+        self._correction_run_in_progress = True
         self._status_bar.reset_timer()
         self._processing_start_time = time.monotonic()
         self._state.set_state(self._state.State.PROCESSING)
         self._processing.start_correction(
-            frame_idx=frame_idx,
+            anchor_frame_idx=anchor_0b,
+            range_start=start_0b,
+            range_end=end_0b,
             points=list(self._state.points),
             labels=list(self._state.labels),
         )
@@ -1458,9 +1556,43 @@ class MainWindow(QMainWindow):
             self._canvas_area.set_overlay_image(self._state.current_overlay)
 
     def _on_image_files_changed(self, files: list) -> None:
-        """Update frame navigator and filmstrip when image list changes."""
-        self._frame_navigator.set_total_frames(len(files))
+        """Update frame navigator, filmstrip, and correction UI bounds."""
+        total = len(files)
+        self._frame_navigator.set_total_frames(total)
         self._filmstrip.set_image_files(files)
+        # Update the correction state machine + toolbar spin-box maxes
+        self._corr_ctrl.set_total_frames(max(1, total))
+        self._toolbar.set_correction_frame_count(max(1, total))
+        # --- Refine spinbox bounds follow the new sequence length ---
+        # AppState has already recomputed default anchor/K via
+        # _reset_refine_defaults(); we just need to lift the spinbox max
+        # caps so the user can dial in any value within range.
+        if total > 0:
+            self._sidebar.set_refine_max_anchor(total)
+            # K is constrained by current anchor, not total.
+            self._sidebar.set_refine_max_overwrite(
+                self._state.refine_anchor_frame
+            )
+            # Mirror the freshly recomputed defaults into the spinboxes
+            # (state already emitted the signals during set_image_files,
+            # but if we connected them after AppState was constructed the
+            # signals fired before any listener was attached -- safest is
+            # to push the current value through explicitly here too).
+            self._sidebar.set_refine_anchor_frame(
+                self._state.refine_anchor_frame
+            )
+            self._sidebar.set_refine_overwrite_count(
+                self._state.refine_overwrite_count
+            )
+
+    def _on_refine_anchor_changed(self, anchor: int) -> None:
+        """Mirror AppState anchor changes into the sidebar UI.
+
+        Also lifts the overwrite-count spinbox max to match the new anchor
+        (since K must satisfy K <= anchor).
+        """
+        self._sidebar.set_refine_anchor_frame(anchor)
+        self._sidebar.set_refine_max_overwrite(anchor)
 
     def _on_frame_range_changed(self, start: int, end: int) -> None:
         """Sync frame range spinboxes when state changes."""
@@ -1557,10 +1689,26 @@ class MainWindow(QMainWindow):
 
     def _on_processing_finished(self) -> None:
         """Handle processing completion."""
+        was_correction = self._correction_run_in_progress
+        self._correction_run_in_progress = False
+
         self._state.set_state(self._state.State.REVIEWING)
         self._active_mask_subdir = "masks"  # Fresh results in masks/
         self._status_bar.set_status("Processing complete", "ready")
         self._status_bar.hide_processing_progress()
+
+        if was_correction:
+            # Correction run finished cleanly → clear points and reset the
+            # correction state machine so the next "Add Correction" starts
+            # from a clean slate.
+            if self._annotation is not None:
+                self._annotation.clear_points()
+            self._corr_ctrl.on_exit_correction()
+            # Just reload the edited frame; skip the post-processing prompt
+            # since the user is still iterating on segmentation quality.
+            self._load_current_frame()
+            return
+
         # Reload current frame to show final results
         self._load_current_frame()
         # Auto-export overlays if enabled
@@ -1587,10 +1735,17 @@ class MainWindow(QMainWindow):
 
     def _on_processing_error(self, error_msg: str) -> None:
         """Handle processing error."""
+        was_correction = self._correction_run_in_progress
+        self._correction_run_in_progress = False
         was_processing = (
             self._state.state == self._state.State.PROCESSING
         )
-        if was_processing and self._state.image_files:
+        if was_correction and self._state.image_files:
+            # Correction run errored — keep existing masks, drop back into
+            # REVIEWING and clear the correction state.
+            self._state.set_state(self._state.State.REVIEWING)
+            self._corr_ctrl.on_exit_correction()
+        elif was_processing and self._state.image_files:
             self._state.set_state(self._state.State.ANNOTATING)
         elif was_processing:
             self._state.set_state(self._state.State.INIT)

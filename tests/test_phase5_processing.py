@@ -43,6 +43,7 @@ def mock_mask_generator():
     mg.initialize = MagicMock()
     mg.set_video = MagicMock()
     mg.add_points = MagicMock()
+    mg.add_original_points = MagicMock()
     mg.cleanup = MagicMock()
 
     def fake_propagate(threshold=0.0, progress_callback=None, frame_callback=None,
@@ -71,6 +72,44 @@ def mock_mask_generator():
 
     mg.propagate_from = MagicMock(side_effect=fake_propagate_from)
     mg.add_correction = MagicMock()
+
+    def fake_propagate_range(anchor_frame_idx, range_start, range_end,
+                             threshold=0.0, progress_callback=None,
+                             frame_callback=None, stop_check=None):
+        # Emit the anchor once, then walk outward toward each end.
+        indices = list(range(int(range_start), int(range_end) + 1))
+        for i in indices:
+            if stop_check and stop_check():
+                break
+            if frame_callback:
+                mask = np.zeros((50, 50), dtype=np.uint8)
+                mask[10:40, 10:40] = 255
+                frame_callback(i, mask)
+
+    mg.propagate_range = MagicMock(side_effect=fake_propagate_range)
+    mg.reset_corrections = MagicMock()
+
+    def fake_refine_early_frames(
+        anchor_frame_idx,
+        anchor_mask,
+        overwrite_count,
+        threshold=0.0,
+        frame_callback=None,
+        progress_callback=None,
+        stop_check=None,
+    ):
+        # Emit the earliest K frames [0, K-1] as the real method does.
+        for i in range(int(overwrite_count)):
+            if stop_check and stop_check():
+                break
+            if frame_callback:
+                mask = np.zeros((50, 50), dtype=np.uint8)
+                mask[15:35, 15:35] = 255
+                frame_callback(i, mask)
+            if progress_callback:
+                progress_callback(i + 1, int(overwrite_count))
+
+    mg.refine_early_frames = MagicMock(side_effect=fake_refine_early_frames)
 
     return mg
 
@@ -189,6 +228,43 @@ class TestProcessingWorker:
         assert "No image files" in errors[0]
         assert len(finished_signals) == 1  # finished always emits
 
+    def test_worker_seeds_original_conditioning(
+        self, qapp, mock_mask_generator, tmp_image_dir,
+    ):
+        """Initial annotation must be registered via `add_original_points`
+        so that subsequent `reset_corrections()` can rebuild the clean
+        baseline. The worker must NOT bypass this by calling `add_points`
+        directly — that would leave `_original_conditioning` empty and
+        break the Re-run Range workflow.
+        """
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+            )
+            worker.run()
+
+            mock_mask_generator.add_original_points.assert_called_once()
+            mock_mask_generator.add_points.assert_not_called()
+
     def test_worker_full_pipeline(self, qapp, mock_mask_generator, tmp_image_dir):
         """Worker should run all 5 stages with mocked model."""
         from controllers.processing_controller import ProcessingWorker
@@ -231,7 +307,7 @@ class TestProcessingWorker:
             # Model methods should have been called
             mock_mask_generator.initialize.assert_called_once()
             mock_mask_generator.set_video.assert_called_once()
-            mock_mask_generator.add_points.assert_called_once()
+            mock_mask_generator.add_original_points.assert_called_once()
             mock_mask_generator.propagate.assert_called_once()
 
             # Should have progress messages
@@ -248,6 +324,241 @@ class TestProcessingWorker:
 
             # finished should fire
             assert len(finished_signals) == 1
+
+    # ------------------------------------------------------------------
+    #  Early-Frame Refinement (Phase B of the refine feature)
+    # ------------------------------------------------------------------
+
+    def test_worker_skips_refine_when_disabled(
+        self, qapp, mock_mask_generator, tmp_image_dir,
+    ):
+        """When `refine_enabled=False` the worker must NOT invoke
+        `refine_early_frames` — it's a pure opt-in post-stage."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+                refine_enabled=False,
+                refine_anchor_frame=2,
+                refine_overwrite_count=1,
+            )
+            worker.run()
+            mock_mask_generator.refine_early_frames.assert_not_called()
+
+    def test_worker_calls_refine_early_frames_when_enabled(
+        self, qapp, mock_mask_generator, tmp_image_dir,
+    ):
+        """When enabled, worker must call refine_early_frames with the
+        configured anchor & overwrite count (both 0-based internally)."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+                refine_enabled=True,
+                refine_anchor_frame=2,   # 0-based: third frame
+                refine_overwrite_count=1,  # overwrite only frame 0
+            )
+            worker.run()
+
+            mock_mask_generator.refine_early_frames.assert_called_once()
+            kwargs = mock_mask_generator.refine_early_frames.call_args.kwargs
+            assert kwargs["anchor_frame_idx"] == 2
+            assert kwargs["overwrite_count"] == 1
+            # Captured anchor mask should have been passed through
+            assert kwargs["anchor_mask"] is not None
+            assert hasattr(kwargs["anchor_mask"], "shape")
+
+    def test_worker_captures_anchor_mask_at_forward_pass(
+        self, qapp, mock_mask_generator, tmp_image_dir,
+    ):
+        """The anchor mask passed to refine must be the SAME instance the
+        forward pass emitted for the anchor frame (in-memory capture, not
+        disk round-trip)."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        # Customize the fake propagate so we can identify the anchor mask
+        # by a unique pixel value per frame.
+        def fake_propagate(threshold=0.0, progress_callback=None,
+                           frame_callback=None, stop_check=None,
+                           start_frame_idx=None):
+            start = start_frame_idx or 0
+            for i in range(start, start + 3):
+                mask = np.full((50, 50), fill_value=i + 1, dtype=np.uint8)
+                if frame_callback:
+                    frame_callback(i, mask)
+
+        mock_mask_generator.propagate.side_effect = fake_propagate
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+                refine_enabled=True,
+                refine_anchor_frame=2,   # third frame, marker value = 3
+                refine_overwrite_count=1,
+            )
+            worker.run()
+
+            captured = mock_mask_generator.refine_early_frames.call_args.kwargs[
+                "anchor_mask"
+            ]
+            # The fake forward pass fills frame 2 with all-3s
+            assert captured is not None
+            assert (np.asarray(captured) == 3).all()
+
+    def test_worker_refine_overwrites_disk_files(
+        self, qapp, mock_mask_generator, tmp_image_dir,
+    ):
+        """Refine stage must write its output masks to the same masks/ dir
+        as the forward pass (overwrite in place)."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        # Marker values: forward pass writes 100, refine writes 200.
+        def fake_propagate(threshold=0.0, progress_callback=None,
+                           frame_callback=None, stop_check=None,
+                           start_frame_idx=None):
+            start = start_frame_idx or 0
+            for i in range(start, start + 3):
+                mask = np.full((50, 50), fill_value=100, dtype=np.uint8)
+                if frame_callback:
+                    frame_callback(i, mask)
+
+        def fake_refine(anchor_frame_idx, anchor_mask, overwrite_count,
+                        threshold=0.0, frame_callback=None,
+                        progress_callback=None, stop_check=None):
+            for i in range(int(overwrite_count)):
+                if frame_callback:
+                    mask = np.full((50, 50), fill_value=200, dtype=np.uint8)
+                    frame_callback(i, mask)
+
+        mock_mask_generator.propagate.side_effect = fake_propagate
+        mock_mask_generator.refine_early_frames.side_effect = fake_refine
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+                refine_enabled=True,
+                refine_anchor_frame=2,
+                refine_overwrite_count=1,
+            )
+            worker.run()
+
+            mask_dir = os.path.join(output_dir, "masks")
+            # Frame 0 should have been overwritten with value 200 (refine)
+            path0 = os.path.join(mask_dir, "mask_000000.tiff")
+            assert os.path.exists(path0)
+            img0 = cv2.imread(path0, cv2.IMREAD_GRAYSCALE)
+            assert img0 is not None and (img0 == 200).all()
+            # Frame 1 should still be 100 (forward pass, not refined)
+            path1 = os.path.join(mask_dir, "mask_000001.tiff")
+            img1 = cv2.imread(path1, cv2.IMREAD_GRAYSCALE)
+            assert img1 is not None and (img1 == 100).all()
+
+    def test_worker_refine_skipped_if_stopped_mid_forward(
+        self, qapp, mock_mask_generator, tmp_image_dir,
+    ):
+        """If the forward pass is cancelled mid-stream, refine must not run
+        (the captured anchor mask may be missing or stale)."""
+        from controllers.processing_controller import ProcessingWorker
+
+        image_files = sorted(
+            [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
+             if f.endswith(".png")]
+        )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            worker = ProcessingWorker(
+                mask_generator=mock_mask_generator,
+                image_files=image_files,
+                output_dir=output_dir,
+                model_cfg="test.yaml",
+                checkpoint="test.pt",
+                device="cpu",
+                points=[[25.0, 25.0]],
+                labels=[1],
+                threshold=0.0,
+                start_frame=1,
+                end_frame=3,
+                intermediate_format="JPEG (fast)",
+                force_reprocess=True,
+                refine_enabled=True,
+                refine_anchor_frame=2,
+                refine_overwrite_count=1,
+            )
+            # Stop the worker before running — conversion stage bails out
+            # before forward pass even starts.
+            worker.stop()
+            worker.run()
+            mock_mask_generator.refine_early_frames.assert_not_called()
 
     def test_worker_png_format(self, qapp, mock_mask_generator, tmp_image_dir):
         """Worker should use PNG conversion when format specifies PNG."""
@@ -366,7 +677,7 @@ class TestProcessingWorker:
 # =============================================================================
 
 class TestCorrectionWorker:
-    """Tests for the correction re-propagation worker."""
+    """Tests for the range-based correction re-propagation worker."""
 
     def test_correction_uninitialized_model(self, qapp):
         """Should emit error if model not initialized."""
@@ -377,7 +688,9 @@ class TestCorrectionWorker:
 
         worker = CorrectionWorker(
             mask_generator=mg,
-            frame_idx=5,
+            anchor_frame_idx=5,
+            range_start=5,
+            range_end=8,
             points=[[10.0, 20.0]],
             labels=[1],
             threshold=0.0,
@@ -398,7 +711,7 @@ class TestCorrectionWorker:
         assert len(finished_signals) == 1
 
     def test_correction_success(self, qapp, mock_mask_generator, tmp_image_dir):
-        """Correction worker should re-propagate and save masks from correction frame."""
+        """Correction worker should re-propagate over the selected range and save masks."""
         from controllers.processing_controller import CorrectionWorker
 
         mock_mask_generator.is_initialized = True
@@ -418,7 +731,9 @@ class TestCorrectionWorker:
 
             worker = CorrectionWorker(
                 mask_generator=mock_mask_generator,
-                frame_idx=1,
+                anchor_frame_idx=1,
+                range_start=0,
+                range_end=2,
                 points=[[25.0, 25.0]],
                 labels=[1],
                 threshold=0.0,
@@ -437,49 +752,53 @@ class TestCorrectionWorker:
             worker.run()
 
             mock_mask_generator.add_correction.assert_called_once()
-            mock_mask_generator.propagate_from.assert_called_once()
+            mock_mask_generator.propagate_range.assert_called_once()
 
-            # propagate_from should be called with start_frame_idx=1
-            call_kwargs = mock_mask_generator.propagate_from.call_args
-            assert call_kwargs.kwargs.get("start_frame_idx") == 1
-            # stop_check and frame_callback should be passed
+            # propagate_range should be called with the new 3-arg signature
+            call_kwargs = mock_mask_generator.propagate_range.call_args
+            assert call_kwargs.kwargs.get("anchor_frame_idx") == 1
+            assert call_kwargs.kwargs.get("range_start") == 0
+            assert call_kwargs.kwargs.get("range_end") == 2
             assert call_kwargs.kwargs.get("stop_check") is not None
             assert call_kwargs.kwargs.get("frame_callback") is not None
 
-            # All frames should be >= correction frame
-            assert all(idx >= 1 for idx in frame_signals)
+            # All frames should be inside [range_start, range_end]
+            assert all(0 <= idx <= 2 for idx in frame_signals)
 
-            # Masks should be saved to disk
+            # Masks saved for each emitted frame
             mask_dir = os.path.join(output_dir, "masks")
             mask_files = [f for f in os.listdir(mask_dir) if f.endswith(".tiff")]
             assert len(mask_files) == len(frame_signals)
 
+            # On successful completion, reset_corrections() is called
+            mock_mask_generator.reset_corrections.assert_called_once()
+
             assert len(finished_signals) == 1
 
     def test_correction_stop_during_propagation(self, qapp, tmp_image_dir):
-        """Stop button should halt correction propagation via stop_check."""
+        """Stop button should halt correction propagation via stop_check,
+        and reset_corrections should NOT be called on an aborted run."""
         from controllers.processing_controller import CorrectionWorker
 
         mg = MagicMock()
         mg.is_initialized = True
 
-        # Mock propagate_from that checks stop_check on each frame
         call_count = 0
-        def fake_propagate_from(start_frame_idx=0, threshold=0.0,
-                                progress_callback=None, frame_callback=None,
-                                stop_check=None):
+        def fake_propagate_range(anchor_frame_idx, range_start, range_end,
+                                 threshold=0.0, progress_callback=None,
+                                 frame_callback=None, stop_check=None):
             nonlocal call_count
-            for i in range(start_frame_idx, start_frame_idx + 10):
+            for i in range(range_start, range_end + 1):
                 if stop_check and stop_check():
                     break
                 mask = np.zeros((50, 50), dtype=np.uint8)
                 if frame_callback:
                     frame_callback(i, mask)
                 call_count += 1
-            return {}
 
-        mg.propagate_from = MagicMock(side_effect=fake_propagate_from)
+        mg.propagate_range = MagicMock(side_effect=fake_propagate_range)
         mg.add_correction = MagicMock()
+        mg.reset_corrections = MagicMock()
 
         image_files = sorted(
             [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
@@ -495,7 +814,9 @@ class TestCorrectionWorker:
 
             worker = CorrectionWorker(
                 mask_generator=mg,
-                frame_idx=0,
+                anchor_frame_idx=0,
+                range_start=0,
+                range_end=2,
                 points=[[10.0, 20.0]],
                 labels=[1],
                 threshold=0.0,
@@ -504,13 +825,12 @@ class TestCorrectionWorker:
                 intermediate_format="JPEG (fast)",
             )
 
-            # Stop immediately — should process 0 frames in propagation
             worker.stop()
             worker.run()
 
-            # propagate_from should still be called, but stop_check halts it
-            # call_count should be 0 since stop was set before propagation
             assert call_count == 0
+            # Stopped runs must NOT call reset_corrections — per todo.md
+            mg.reset_corrections.assert_not_called()
 
     def test_correction_scales_points(self, qapp, tmp_image_dir):
         """Correction should scale points when images are downsampled."""
@@ -519,7 +839,8 @@ class TestCorrectionWorker:
         mg = MagicMock()
         mg.is_initialized = True
         mg.add_correction = MagicMock()
-        mg.propagate_from = MagicMock(return_value={})
+        mg.propagate_range = MagicMock(return_value=None)
+        mg.reset_corrections = MagicMock()
 
         image_files = sorted(
             [os.path.join(tmp_image_dir, f) for f in os.listdir(tmp_image_dir)
@@ -536,7 +857,9 @@ class TestCorrectionWorker:
 
             worker = CorrectionWorker(
                 mask_generator=mg,
-                frame_idx=0,
+                anchor_frame_idx=0,
+                range_start=0,
+                range_end=2,
                 points=[[40.0, 30.0]],  # original coords
                 labels=[1],
                 threshold=0.0,
@@ -547,7 +870,6 @@ class TestCorrectionWorker:
 
             worker.run()
 
-            # Check that add_correction was called with scaled points
             call_args = mg.add_correction.call_args
             scaled_points = call_args[0][1]  # second positional arg
             # scale_x = 25/50 = 0.5, scale_y = 25/50 = 0.5
@@ -564,7 +886,9 @@ class TestCorrectionWorker:
 
         worker = CorrectionWorker(
             mask_generator=mock_mask_generator,
-            frame_idx=0,
+            anchor_frame_idx=0,
+            range_start=0,
+            range_end=0,
             points=points,
             labels=labels,
             threshold=0.0,
@@ -604,7 +928,13 @@ class TestProcessingController:
         errors = []
         ctrl.processing_error.connect(lambda msg: errors.append(msg))
 
-        ctrl.start_correction(0, [[10.0, 20.0]], [1])
+        ctrl.start_correction(
+            anchor_frame_idx=0,
+            range_start=0,
+            range_end=2,
+            points=[[10.0, 20.0]],
+            labels=[1],
+        )
         assert len(errors) == 1
         assert "not initialized" in errors[0].lower()
 

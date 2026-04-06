@@ -32,6 +32,104 @@ class TestSidebar:
         assert hasattr(sidebar, 'temporal_smooth_requested')
 
 
+class TestSidebarRefineSection:
+    """Phase D: Early-Frame Refinement section in the Sidebar."""
+
+    def test_widgets_exist(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        assert hasattr(sidebar, "_refine_enabled_check")
+        assert hasattr(sidebar, "_refine_anchor_input")
+        assert hasattr(sidebar, "_refine_overwrite_input")
+        # The CollapsibleSection should also be reachable for layout tests.
+        assert hasattr(sidebar, "_refine_section")
+
+    def test_signals_defined(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        assert hasattr(sidebar, "refine_enabled_changed")
+        assert hasattr(sidebar, "refine_anchor_changed")
+        assert hasattr(sidebar, "refine_overwrite_changed")
+
+    def test_default_values(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        # Default: opt-in disabled, anchor=10, K=3 (matching AppState defaults)
+        assert sidebar._refine_enabled_check.isChecked() is False
+        assert int(sidebar._refine_anchor_input.value()) == 10
+        assert int(sidebar._refine_overwrite_input.value()) == 3
+
+    def test_toggle_emits_enabled_signal(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        signals = []
+        sidebar.refine_enabled_changed.connect(lambda v: signals.append(v))
+        sidebar._refine_enabled_check.setChecked(True)
+        assert signals == [True]
+        sidebar._refine_enabled_check.setChecked(False)
+        assert signals == [True, False]
+
+    def test_anchor_change_emits_signal(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        signals = []
+        sidebar.refine_anchor_changed.connect(lambda v: signals.append(v))
+        sidebar._refine_anchor_input.set_value(7)
+        # Programmatic set_value blocks signals (matches NumberInput behavior),
+        # so we drive via the underlying spinbox to simulate user input.
+        sidebar._refine_anchor_input._spinbox.setValue(8)
+        assert 8 in signals
+
+    def test_overwrite_change_emits_signal(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        signals = []
+        sidebar.refine_overwrite_changed.connect(lambda v: signals.append(v))
+        sidebar._refine_overwrite_input._spinbox.setValue(5)
+        assert 5 in signals
+
+    def test_set_refine_enabled_programmatic_no_signal(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        signals = []
+        sidebar.refine_enabled_changed.connect(lambda v: signals.append(v))
+        sidebar.set_refine_enabled(True)
+        assert sidebar._refine_enabled_check.isChecked() is True
+        # Programmatic update must not echo a signal back -- otherwise
+        # AppState <-> Sidebar would loop.
+        assert signals == []
+
+    def test_set_refine_anchor_programmatic_no_signal(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        signals = []
+        sidebar.refine_anchor_changed.connect(lambda v: signals.append(v))
+        sidebar.set_refine_anchor_frame(15)
+        assert int(sidebar._refine_anchor_input.value()) == 15
+        assert signals == []
+
+    def test_set_refine_overwrite_programmatic_no_signal(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        signals = []
+        sidebar.refine_overwrite_changed.connect(lambda v: signals.append(v))
+        sidebar.set_refine_overwrite_count(7)
+        assert int(sidebar._refine_overwrite_input.value()) == 7
+        assert signals == []
+
+    def test_set_refine_max_anchor_updates_spinbox_range(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        sidebar.set_refine_max_anchor(50)
+        assert sidebar._refine_anchor_input._spinbox.maximum() == 50
+
+    def test_set_refine_max_overwrite_updates_spinbox_range(self, qapp):
+        from gui.panels.sidebar import Sidebar
+        sidebar = Sidebar()
+        sidebar.set_refine_max_overwrite(40)
+        assert sidebar._refine_overwrite_input._spinbox.maximum() == 40
+
+
 class TestToolbar:
     def test_creation(self, qapp):
         from gui.panels.toolbar import Toolbar
