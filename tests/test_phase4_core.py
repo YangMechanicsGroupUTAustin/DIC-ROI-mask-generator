@@ -142,16 +142,16 @@ class TestSpatialSmoothing:
         # Both should have edges, PM edges should be comparable or sharper
         assert pm_edge > 0
 
-    def test_post_gaussian(self):
-        """Post-Gaussian should further smooth."""
+    def test_gaussian_sigma(self):
+        """Per-iteration Gaussian should smooth mask boundaries."""
         from core.spatial_smoothing import perona_malik_smooth
         mask = np.zeros((50, 50), dtype=np.uint8)
         mask[20:30, 20:30] = 255
-        result_no_post = perona_malik_smooth(mask, num_iterations=5, post_gaussian_sigma=0.0)
-        result_with_post = perona_malik_smooth(mask, num_iterations=5, post_gaussian_sigma=2.0)
+        result_no_gauss = perona_malik_smooth(mask, num_iterations=5, gaussian_sigma=0.0)
+        result_with_gauss = perona_malik_smooth(mask, num_iterations=5, gaussian_sigma=2.0)
         # Both should be valid binary masks
-        assert set(np.unique(result_no_post)) <= {0, 255}
-        assert set(np.unique(result_with_post)) <= {0, 255}
+        assert set(np.unique(result_no_gauss)) <= {0, 255}
+        assert set(np.unique(result_with_gauss)) <= {0, 255}
 
 
 # --- Temporal Smoothing Tests ---

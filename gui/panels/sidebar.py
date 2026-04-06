@@ -114,7 +114,9 @@ class Sidebar(QWidget):
     shape_removed = pyqtSignal(int)                        # shape index
     shape_selected = pyqtSignal(int)                       # shape index
     spatial_smooth_requested = pyqtSignal(dict)
+    spatial_preview_requested = pyqtSignal(dict)
     temporal_smooth_requested = pyqtSignal(dict)
+    pp_step_advanced = pyqtSignal(int)  # step index that was just completed/skipped
     refresh_stats_requested = pyqtSignal()
     mask_view_changed = pyqtSignal(str)  # subdir name: "masks", "mask_spatial_smoothing", etc.
     panel_switched = pyqtSignal(str)  # "processing" or "postprocessing"
@@ -783,47 +785,69 @@ class Sidebar(QWidget):
         )
         pp_scroll_layout.addWidget(self._mask_view_select)
 
-        # --- Spatial Smoothing section ---
-        spatial_section = CollapsibleSection(
-            "Spatial Smoothing", icon_name="waves", default_open=True
+        # ── Step state management ──
+        # 0 = Manual Edit, 1 = Spatial, 2 = Temporal
+        self._pp_step_sections: list[CollapsibleSection] = []
+        self._pp_current_step: int = 0
+
+        # --- Step 0: Manual Edit ---
+        self._step0_section = CollapsibleSection(
+            "Step 0 \u00b7 Manual Edit", icon_name="pencil", default_open=True,
         )
 
-        # 2-column grid: Iterations + dt
-        spatial_grid = QWidget()
-        spatial_grid_layout = QGridLayout(spatial_grid)
-        spatial_grid_layout.setContentsMargins(0, 0, 0, 0)
-        spatial_grid_layout.setSpacing(8)
-
-        self._spatial_iterations = NumberInput(
-            "Iterations", default=50, min_val=1, max_val=500,
-            step=1, decimals=0, icon_name="hash",
-            tooltip="Number of Perona-Malik diffusion iterations.\nMore iterations produce smoother mask boundaries.",
+        step0_info = QLabel(
+            "Manually fix mask errors before smoothing.\n"
+            "(Brush tools coming soon — skip for now)"
         )
-        spatial_grid_layout.addWidget(self._spatial_iterations, 0, 0)
-
-        self._spatial_dt = NumberInput(
-            "dt", default=0.1, min_val=0.001, max_val=1.0,
-            step=0.01, decimals=3, icon_name="timer",
-            tooltip="Time step per iteration. Smaller = more stable but slower.\nKeep below 0.25 for numerical stability.",
+        step0_info.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent; padding: 2px 0;"
         )
-        spatial_grid_layout.addWidget(self._spatial_dt, 0, 1)
+        step0_info.setWordWrap(True)
+        self._step0_section.add_widget(step0_info)
 
-        spatial_section.add_widget(spatial_grid)
+        step0_btns = QWidget()
+        step0_btn_layout = QHBoxLayout(step0_btns)
+        step0_btn_layout.setContentsMargins(0, 0, 0, 0)
+        step0_btn_layout.setSpacing(8)
+        self._step0_done_btn = QPushButton("Done")
+        self._step0_done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step0_done_btn.setProperty("cssClass", "btn-success")
+        self._step0_done_btn.setToolTip("Mark manual editing as complete.")
+        self._step0_done_btn.clicked.connect(lambda: self._advance_step(0))
+        self._step0_skip_btn = QPushButton("Skip")
+        self._step0_skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step0_skip_btn.setToolTip("Skip manual editing.")
+        self._step0_skip_btn.clicked.connect(lambda: self._advance_step(0))
+        step0_btn_layout.addWidget(self._step0_done_btn)
+        step0_btn_layout.addWidget(self._step0_skip_btn)
+        self._step0_section.add_widget(step0_btns)
 
-        self._spatial_kappa = NumberInput(
-            "Lambda / Kappa", default=30.0, min_val=0.1, max_val=200.0,
-            step=0.1, decimals=1, icon_name="sigma",
-            tooltip="Conductance coefficient controlling edge sensitivity.\nLow values preserve weak edges; high values only keep strong edges.",
+        pp_scroll_layout.addWidget(self._step0_section)
+        self._pp_step_sections.append(self._step0_section)
+
+        # --- Step 1: Spatial Smoothing ---
+        self._step1_section = CollapsibleSection(
+            "Step 1 \u00b7 Spatial Smoothing", icon_name="waves", default_open=True,
         )
-        spatial_section.add_widget(self._spatial_kappa)
 
-        self._spatial_option = SelectField(
-            "Option",
-            options=["Option 1 (exponential)", "Option 2 (rational)"],
-            default="Option 1 (exponential)",
-            tooltip="Diffusion function type.\nExponential: better at preserving sharp edges.\nRational: better at preserving wide, gradual edges.",
+        self._spatial_strength = SelectField(
+            "Smoothing Strength",
+            options=[
+                "Light (5 iterations)",
+                "Moderate (10 iterations)",
+                "Standard (20 iterations)",
+                "Strong (50 iterations)",
+            ],
+            default="Standard (20 iterations)",
+            tooltip=(
+                "Light: 5 iterations, minimal edge cleanup\n"
+                "Moderate: 10 iterations, mild smoothing\n"
+                "Standard: 20 iterations, balanced smoothing\n"
+                "Strong: 50 iterations, aggressive smoothing"
+            ),
         )
-        spatial_section.add_widget(self._spatial_option)
+        self._step1_section.add_widget(self._spatial_strength)
 
         self._spatial_replace_check = QCheckBox("Replace original masks")
         self._spatial_replace_check.setStyleSheet(
@@ -834,21 +858,64 @@ class Sidebar(QWidget):
             "Write smoothed masks back to the masks/ directory,\n"
             "replacing the originals instead of creating a new folder."
         )
-        spatial_section.add_widget(self._spatial_replace_check)
+        self._step1_section.add_widget(self._spatial_replace_check)
 
-        self._spatial_btn = _create_accent_button("Apply Spatial Smooth")
+        # Preview + Apply buttons side by side
+        step1_btns = QWidget()
+        step1_btn_layout = QHBoxLayout(step1_btns)
+        step1_btn_layout.setContentsMargins(0, 0, 0, 0)
+        step1_btn_layout.setSpacing(8)
+
+        self._spatial_preview_btn = QPushButton("Preview")
+        self._spatial_preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._spatial_preview_btn.setStyleSheet(
+            f"QPushButton {{ background: {Colors.BG_LIGHT}; "
+            f"color: {Colors.TEXT_SECONDARY}; border: 1px solid {Colors.BORDER}; "
+            f"border-radius: 6px; padding: 6px 0; font-size: {Fonts.SIZE_SM}px; }}"
+            f"QPushButton:hover {{ background: {Colors.BG_INPUT}; "
+            f"color: {Colors.TEXT_PRIMARY}; }}"
+        )
+        self._spatial_preview_btn.setToolTip(
+            "Preview smoothing on the current frame only (instant).\n"
+            "Shows before/after comparison without processing all frames."
+        )
+        self._spatial_preview_btn.clicked.connect(self._on_spatial_preview)
+        step1_btn_layout.addWidget(self._spatial_preview_btn)
+
+        self._spatial_btn = _create_accent_button("Apply to All")
         self._spatial_btn.setToolTip(
-            "Apply Perona-Malik anisotropic diffusion to each mask independently.\n"
+            "Apply smoothing to all mask frames.\n"
             "Smooths jagged mask boundaries while preserving overall shape."
         )
         self._spatial_btn.clicked.connect(self._on_spatial_smooth)
-        spatial_section.add_widget(self._spatial_btn)
+        step1_btn_layout.addWidget(self._spatial_btn)
 
-        pp_scroll_layout.addWidget(spatial_section)
+        self._step1_section.add_widget(step1_btns)
 
-        # --- Temporal Smoothing section ---
-        temporal_section = CollapsibleSection(
-            "Temporal Smoothing", icon_name="sliders", default_open=True
+        # Done / Skip row
+        step1_nav = QWidget()
+        step1_nav_layout = QHBoxLayout(step1_nav)
+        step1_nav_layout.setContentsMargins(0, 4, 0, 0)
+        step1_nav_layout.setSpacing(8)
+        self._step1_done_btn = QPushButton("Done")
+        self._step1_done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step1_done_btn.setProperty("cssClass", "btn-success")
+        self._step1_done_btn.setToolTip("Mark spatial smoothing as complete.")
+        self._step1_done_btn.clicked.connect(lambda: self._advance_step(1))
+        self._step1_skip_btn = QPushButton("Skip")
+        self._step1_skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step1_skip_btn.setToolTip("Skip spatial smoothing.")
+        self._step1_skip_btn.clicked.connect(lambda: self._advance_step(1))
+        step1_nav_layout.addWidget(self._step1_done_btn)
+        step1_nav_layout.addWidget(self._step1_skip_btn)
+        self._step1_section.add_widget(step1_nav)
+
+        pp_scroll_layout.addWidget(self._step1_section)
+        self._pp_step_sections.append(self._step1_section)
+
+        # --- Step 2: Temporal Smoothing ---
+        self._step2_section = CollapsibleSection(
+            "Step 2 \u00b7 Temporal Smoothing", icon_name="sliders", default_open=True,
         )
 
         # Input source indicator
@@ -861,36 +928,25 @@ class Sidebar(QWidget):
             "Shows which mask directory temporal smoothing will read from.\n"
             "If spatial smoothing results exist, temporal will chain from them."
         )
-        temporal_section.add_widget(self._temporal_source_label)
+        self._step2_section.add_widget(self._temporal_source_label)
 
-        # 2-column grid: Var Threshold + Neighbors
-        temporal_grid = QWidget()
-        temporal_grid_layout = QGridLayout(temporal_grid)
-        temporal_grid_layout.setContentsMargins(0, 0, 0, 0)
-        temporal_grid_layout.setSpacing(8)
-
-        self._temporal_var = NumberInput(
-            "Var Threshold", default=50000, min_val=0, max_val=999999,
-            step=1000, decimals=0, icon_name="gauge",
-            tooltip="Variance threshold for anomaly detection.\nFrames with mask variance above this are flagged and excluded from smoothing.",
+        self._temporal_strength = SelectField(
+            "Smoothing Strength",
+            options=[
+                "Repair Bad Frames Only",
+                "Repair + Light Smoothing",
+                "Repair + Standard Smoothing",
+                "Repair + Strong Smoothing",
+            ],
+            default="Repair Bad Frames Only",
+            tooltip=(
+                "Repair Bad Frames Only: correct bad frames, preserve all dynamics\n"
+                "Repair + Light Smoothing: fix bad frames + subtle temporal smoothing\n"
+                "Repair + Standard Smoothing: fix bad frames + moderate temporal smoothing\n"
+                "Repair + Strong Smoothing: fix bad frames + aggressive smoothing (may flatten rapid changes)"
+            ),
         )
-        temporal_grid_layout.addWidget(self._temporal_var, 0, 0)
-
-        self._temporal_neighbors = NumberInput(
-            "Neighbors", default=2, min_val=1, max_val=10,
-            step=1, decimals=0, icon_name="hash",
-            tooltip="Number of neighboring frames on each side used for smoothing.\n2 neighbors = 5-frame sliding window (2 before + current + 2 after).",
-        )
-        temporal_grid_layout.addWidget(self._temporal_neighbors, 0, 1)
-
-        temporal_section.add_widget(temporal_grid)
-
-        self._temporal_sigma = NumberInput(
-            "Sigma", default=2.0, min_val=0.1, max_val=20.0,
-            step=0.1, decimals=1, icon_name="sigma",
-            tooltip="3D Gaussian sigma for temporal smoothing.\nHigher values apply stronger smoothing across frames.",
-        )
-        temporal_section.add_widget(self._temporal_sigma)
+        self._step2_section.add_widget(self._temporal_strength)
 
         self._temporal_replace_check = QCheckBox("Replace original masks")
         self._temporal_replace_check.setStyleSheet(
@@ -901,17 +957,21 @@ class Sidebar(QWidget):
             "Write smoothed masks back to the masks/ directory,\n"
             "replacing the originals instead of creating a new folder."
         )
-        temporal_section.add_widget(self._temporal_replace_check)
+        self._step2_section.add_widget(self._temporal_replace_check)
 
         self._temporal_btn = _create_accent_button("Apply Temporal Smooth")
         self._temporal_btn.setToolTip(
             "Apply 3D Gaussian filter across the temporal dimension.\n"
-            "Ensures smooth mask transitions between consecutive frames."
+            "Fixes outlier frames and ensures smooth transitions."
         )
         self._temporal_btn.clicked.connect(self._on_temporal_smooth)
-        temporal_section.add_widget(self._temporal_btn)
+        self._step2_section.add_widget(self._temporal_btn)
 
-        pp_scroll_layout.addWidget(temporal_section)
+        pp_scroll_layout.addWidget(self._step2_section)
+        self._pp_step_sections.append(self._step2_section)
+
+        # Apply initial step state
+        self._refresh_step_visuals()
 
         # --- Mask Statistics section ---
         stats_section = CollapsibleSection(
@@ -1385,24 +1445,91 @@ class Sidebar(QWidget):
                 self, "Load Error", f"Failed to load preset:\n{e}",
             )
 
-    def _on_spatial_smooth(self) -> None:
-        params = {
-            "iterations": int(self._spatial_iterations.value()),
-            "dt": self._spatial_dt.value(),
-            "kappa": self._spatial_kappa.value(),
-            "option": 1 if "1" in self._spatial_option.value() else 2,
+    # ── Spatial / temporal preset mappings ──
+
+    _SPATIAL_PRESETS = {
+        "Light (5 iterations)": {"iterations": 5, "gaussian_sigma": 2.0},
+        "Moderate (10 iterations)": {"iterations": 10, "gaussian_sigma": 2.0},
+        "Standard (20 iterations)": {"iterations": 20, "gaussian_sigma": 2.0},
+        "Strong (50 iterations)": {"iterations": 50, "gaussian_sigma": 2.0},
+    }
+    _TEMPORAL_PRESETS = {
+        "Repair Bad Frames Only": {"sigma": 2.0, "temporal_sigma": 0},
+        "Repair + Light Smoothing": {"sigma": 2.0, "temporal_sigma": 0.5},
+        "Repair + Standard Smoothing": {"sigma": 2.0, "temporal_sigma": 1.0},
+        "Repair + Strong Smoothing": {"sigma": 2.0, "temporal_sigma": 2.0},
+    }
+
+    def _get_spatial_params(self) -> dict:
+        """Build spatial smoothing params from the selected preset."""
+        preset = self._SPATIAL_PRESETS.get(
+            self._spatial_strength.value(),
+            self._SPATIAL_PRESETS["Standard (20 iterations)"],
+        )
+        return {
+            "iterations": preset["iterations"],
+            "dt": 0.1,
+            "kappa": 30.0,
+            "option": 1,
+            "gaussian_sigma": preset["gaussian_sigma"],
             "replace_originals": self._spatial_replace_check.isChecked(),
         }
-        self.spatial_smooth_requested.emit(params)
+
+    def _on_spatial_smooth(self) -> None:
+        self.spatial_smooth_requested.emit(self._get_spatial_params())
+
+    def _on_spatial_preview(self) -> None:
+        self.spatial_preview_requested.emit(self._get_spatial_params())
 
     def _on_temporal_smooth(self) -> None:
+        preset = self._TEMPORAL_PRESETS.get(
+            self._temporal_strength.value(),
+            self._TEMPORAL_PRESETS["Repair Bad Frames Only"],
+        )
         params = {
-            "variance_threshold": int(self._temporal_var.value()),
-            "neighbors": int(self._temporal_neighbors.value()),
-            "sigma": self._temporal_sigma.value(),
+            "sigma": preset["sigma"],
+            "temporal_sigma": preset.get("temporal_sigma", 0),
+            "neighbors": 2,
+            "variance_threshold": None,
             "replace_originals": self._temporal_replace_check.isChecked(),
         }
         self.temporal_smooth_requested.emit(params)
+
+    # ── Step navigation ──
+
+    def _advance_step(self, completed_step: int) -> None:
+        """Mark a step as done and unlock the next one."""
+        if completed_step >= self._pp_current_step:
+            self._pp_current_step = completed_step + 1
+            self._refresh_step_visuals()
+            self.pp_step_advanced.emit(completed_step)
+
+    def _refresh_step_visuals(self) -> None:
+        """Update all step sections to reflect current progress."""
+        for i, section in enumerate(self._pp_step_sections):
+            if i < self._pp_current_step:
+                # Completed
+                section.set_badge("DONE", Colors.SUCCESS, Colors.SUCCESS_BG)
+                section.set_title_color(Colors.SUCCESS)
+                section.set_content_enabled(True)
+                section.set_open(False)
+            elif i == self._pp_current_step:
+                # Active
+                section.set_badge("", "", "")
+                section.set_title_color(Colors.TEXT_MUTED)
+                section.set_content_enabled(True)
+                section.set_open(True)
+            else:
+                # Locked
+                section.set_badge("LOCKED", Colors.TEXT_DIM, Colors.BG_INPUT)
+                section.set_title_color(Colors.TEXT_DIM)
+                section.set_content_enabled(False)
+                section.set_open(False)
+
+    def reset_pp_steps(self) -> None:
+        """Reset post-processing step progress (e.g. on new project)."""
+        self._pp_current_step = 0
+        self._refresh_step_visuals()
 
     def _on_mask_view_changed(self, label: str) -> None:
         """Emit the mask subdirectory corresponding to the selected view."""
@@ -1428,6 +1555,18 @@ class Sidebar(QWidget):
         self._mask_view_select.set_value(label)
         self._mask_view_select.blockSignals(False)
 
-    def update_temporal_source_label(self, source_dir: str) -> None:
-        """Update the temporal smoothing input source indicator."""
+    def update_temporal_source_label(
+        self, source_dir: str, is_chained: bool = False,
+    ) -> None:
+        """Update the temporal smoothing input source indicator.
+
+        Args:
+            source_dir: Display text for the source directory.
+            is_chained: True when temporal chains from spatial results.
+        """
         self._temporal_source_label.setText(f"Input: {source_dir}")
+        color = Colors.SUCCESS if is_chained else Colors.TEXT_DIM
+        self._temporal_source_label.setStyleSheet(
+            f"color: {color}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent; padding: 2px 0; font-style: italic;"
+        )

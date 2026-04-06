@@ -17,6 +17,8 @@ controllers, and AppState for full application functionality.
 import logging
 import os
 import time
+
+import numpy as np
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
@@ -41,7 +43,7 @@ from gui.panels.frame_navigator import FrameNavigator
 from gui.panels.sidebar import Sidebar
 from gui.panels.status_bar import StatusBar
 from gui.panels.toolbar import Toolbar
-from gui.theme import Colors
+from gui.theme import Colors, Fonts
 
 logger = logging.getLogger("sam2studio.main_window")
 
@@ -77,6 +79,9 @@ class MainWindow(QMainWindow):
         # Active mask directory for display (relative to output_dir)
         # Changes when smoothing outputs to a separate directory
         self._active_mask_subdir: str = "masks"
+
+        # Track whether spatial smoothing was run in this session
+        self._spatial_ran_this_session: bool = False
 
         self.setWindowTitle("DIC Mask Generator")
         self.setMinimumSize(1200, 700)
@@ -708,6 +713,9 @@ class MainWindow(QMainWindow):
         if smoothing is not None:
             self._sidebar.spatial_smooth_requested.connect(
                 self._on_spatial_smooth
+            )
+            self._sidebar.spatial_preview_requested.connect(
+                self._on_spatial_preview
             )
             self._sidebar.temporal_smooth_requested.connect(
                 self._on_temporal_smooth
@@ -1675,6 +1683,7 @@ class MainWindow(QMainWindow):
         else:
             smooth_output = os.path.join(output_dir, "mask_spatial_smoothing")
 
+        self._spatial_ran_this_session = True
         self._status_bar.reset_timer()
         self._smoothing_start_time = time.monotonic()
         self._state.set_state(self._state.State.POST_PROCESSING)
@@ -1685,14 +1694,40 @@ class MainWindow(QMainWindow):
             dt=params.get("dt", 0.1),
             kappa=params.get("kappa", 30.0),
             option=params.get("option", 1),
+            gaussian_sigma=params.get("gaussian_sigma", 2.0),
         )
+
+    def _on_spatial_preview(self, params: dict) -> None:
+        """Open the interactive spatial smoothing preview dialog."""
+        if self._state is None or not self._state.output_dir:
+            return
+
+        masks_dir = os.path.join(self._state.output_dir, "masks")
+        if not os.path.isdir(masks_dir):
+            self._show_error("Cannot Preview", "No masks directory found.")
+            return
+
+        from gui.dialogs.spatial_preview_dialog import SpatialPreviewDialog
+
+        frame_idx = max(0, self._state.current_frame - 1)
+        preset_name = self._sidebar._spatial_strength.value()
+
+        dlg = SpatialPreviewDialog(
+            masks_dir=masks_dir,
+            initial_frame=frame_idx,
+            initial_preset=preset_name,
+            parent=self,
+        )
+        dlg.exec()
 
     def _on_temporal_smooth(self, params: dict) -> None:
         """Start temporal smoothing with parameters from the sidebar.
 
-        Smart chaining: if spatial smoothing results exist, temporal
-        reads from ``mask_spatial_smoothing/`` to chain naturally.
-        Otherwise it reads from ``masks/``.
+        Before starting, checks whether spatial smoothing has been run
+        and warns the user accordingly:
+        - No spatial folder at all → warn, offer to proceed on raw masks
+        - Spatial folder exists from a previous session → ask whether to use it
+        - Spatial ran this session → chain automatically (no warning)
         """
         if self._smoothing is None or self._state is None:
             return
@@ -1705,20 +1740,63 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Smart source selection: prefer spatial smoothed if available
         spatial_dir = os.path.join(output_dir, "mask_spatial_smoothing")
         masks_dir = os.path.join(output_dir, "masks")
-        if os.path.isdir(spatial_dir) and os.listdir(spatial_dir):
-            input_dir = spatial_dir
-        elif os.path.isdir(masks_dir):
-            input_dir = masks_dir
-        else:
+        spatial_exists = (
+            os.path.isdir(spatial_dir) and bool(os.listdir(spatial_dir))
+        )
+
+        if not os.path.isdir(masks_dir):
             self._show_error(
                 "Cannot Smooth",
                 f"No mask directory found in:\n{output_dir}\n"
                 "Run processing first.",
             )
             return
+
+        # --- Determine input source with user confirmation ---
+        if self._spatial_ran_this_session and spatial_exists:
+            # Best case: spatial was run this session, chain automatically
+            input_dir = spatial_dir
+        elif spatial_exists and not self._spatial_ran_this_session:
+            # Spatial folder exists from a previous session
+            reply = QMessageBox.question(
+                self,
+                "Use Previous Spatial Smoothing?",
+                "Spatial smoothing has not been run in this session,\n"
+                "but results from a previous session were found.\n\n"
+                "Use previous spatial smoothing results?\n\n"
+                "  Yes  \u2192  Chain from previous spatial results\n"
+                "  No   \u2192  Run on raw masks (skip spatial)",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            input_dir = (
+                spatial_dir
+                if reply == QMessageBox.StandardButton.Yes
+                else masks_dir
+            )
+        else:
+            # No spatial results at all
+            reply = QMessageBox.warning(
+                self,
+                "Spatial Smoothing Not Run",
+                "Step 1 (Spatial Smoothing) has not been run yet.\n\n"
+                "Recommended workflow:\n"
+                "  1. Apply Spatial Smoothing first\n"
+                "  2. Then apply Temporal Smoothing\n\n"
+                "Proceed with temporal smoothing on raw masks anyway?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            input_dir = masks_dir
 
         if params.get("replace_originals"):
             smooth_output = masks_dir
@@ -1734,6 +1812,7 @@ class MainWindow(QMainWindow):
             sigma=params.get("sigma", 2.0),
             num_neighbors=params.get("neighbors", 2),
             variance_threshold=params.get("variance_threshold"),
+            temporal_sigma=params.get("temporal_sigma", 0),
         )
 
     def _on_smoothing_progress(
@@ -1823,17 +1902,19 @@ class MainWindow(QMainWindow):
     def _update_temporal_source_label(self) -> None:
         """Update the temporal smoothing input source label in sidebar."""
         if self._state is None or not self._state.output_dir:
-            self._sidebar.update_temporal_source_label("masks/")
+            self._sidebar.update_temporal_source_label("masks/", is_chained=False)
             return
         spatial_dir = os.path.join(
             self._state.output_dir, "mask_spatial_smoothing",
         )
         if os.path.isdir(spatial_dir) and os.listdir(spatial_dir):
             self._sidebar.update_temporal_source_label(
-                "mask_spatial_smoothing/ (chained)"
+                "mask_spatial_smoothing/ (chained)", is_chained=True,
             )
         else:
-            self._sidebar.update_temporal_source_label("masks/")
+            self._sidebar.update_temporal_source_label(
+                "masks/", is_chained=False,
+            )
 
     def _on_sidebar_panel_switched(self, panel: str) -> None:
         """Refresh dynamic labels when user switches sidebar tabs."""

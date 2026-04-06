@@ -745,8 +745,8 @@ class TestSpatialSmoothWorker:
             ]
             assert len(output_files) == 5
 
-    def test_spatial_smooth_with_post_gaussian(self, qapp, tmp_mask_dir):
-        """Should apply post-Gaussian smoothing."""
+    def test_spatial_smooth_with_gaussian(self, qapp, tmp_mask_dir):
+        """Should apply per-iteration Gaussian smoothing."""
         from controllers.smoothing_controller import SpatialSmoothWorker
 
         with tempfile.TemporaryDirectory() as output_dir:
@@ -754,7 +754,7 @@ class TestSpatialSmoothWorker:
                 input_dir=tmp_mask_dir,
                 output_dir=output_dir,
                 num_iterations=3,
-                post_gaussian_sigma=1.0,
+                gaussian_sigma=1.0,
             )
 
             finished_dirs = []
