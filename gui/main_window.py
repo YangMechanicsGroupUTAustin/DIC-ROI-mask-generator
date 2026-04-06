@@ -19,7 +19,7 @@ import os
 import time
 
 import numpy as np
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import QRect, QSettings, Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QDialog,
@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from controllers.manual_edit_controller import ManualEditController
 from gui.icons import get_icon
 from gui.panels.canvas_area import CanvasArea
 from gui.panels.filmstrip import Filmstrip
@@ -82,6 +83,21 @@ class MainWindow(QMainWindow):
 
         # Track whether spatial smoothing was run in this session
         self._spatial_ran_this_session: bool = False
+
+        # ── Step 0 manual edit state ──
+        # Per-step completion (0=Manual Edit, 1=Spatial, 2=Temporal).
+        # Controls the chain rule: step N reads from whatever the last
+        # completed previous step wrote to.
+        self._step_done: dict[int, bool] = {0: False, 1: False, 2: False}
+        self._manual_edit = ManualEditController(self)
+        self._manual_is_eraser: bool = False
+        self._manual_brush_radius: int = 10
+        self._manual_overlay_timer = QTimer(self)
+        self._manual_overlay_timer.setSingleShot(True)
+        self._manual_overlay_timer.setInterval(33)  # ~30 fps overlay refresh
+        self._manual_overlay_timer.timeout.connect(
+            self._refresh_overlay_from_manual_edit
+        )
 
         self.setWindowTitle("DIC Mask Generator")
         self.setMinimumSize(1200, 700)
@@ -730,6 +746,32 @@ class MainWindow(QMainWindow):
                 self._on_sidebar_panel_switched
             )
 
+        # --- Step 0 manual edit wiring ---
+        self._sidebar.pp_step_advanced.connect(self._on_pp_step_advanced)
+        self._sidebar.manual_tool_changed.connect(
+            self._on_manual_tool_changed
+        )
+        self._sidebar.manual_brush_size_changed.connect(
+            self._on_manual_brush_size_changed
+        )
+        self._sidebar.manual_undo_requested.connect(self._manual_edit.undo)
+        self._sidebar.manual_redo_requested.connect(self._manual_edit.redo)
+
+        self._canvas_area.brush_stroke_begun.connect(
+            self._on_manual_brush_begin
+        )
+        self._canvas_area.brush_stroke_continued.connect(
+            self._on_manual_brush_continue
+        )
+        self._canvas_area.brush_stroke_ended.connect(
+            self._on_manual_brush_end
+        )
+
+        self._manual_edit.mask_modified.connect(self._on_manual_mask_modified)
+        self._manual_edit.undo_state_changed.connect(
+            self._sidebar.set_manual_undo_state
+        )
+
         # --- Toolbar signals ---
         self._toolbar.tool_changed.connect(self._canvas_area.set_active_tool)
 
@@ -1341,9 +1383,20 @@ class MainWindow(QMainWindow):
     # --- Frame navigator handlers ---
 
     def _on_frame_changed(self, frame: int) -> None:
-        """Handle frame navigation: update state and load the frame image."""
+        """Handle frame navigation: update state and load the frame image.
+
+        If Step 0 (Manual Edit) is the active post-processing step, flush
+        the current frame's in-memory edits to disk before switching so
+        the user never loses work on navigation, and re-seed the
+        controller with the new frame afterwards.
+        """
+        manual_active = self._is_manual_edit_active()
+        if manual_active:
+            self._manual_edit.save_frame_if_dirty()
         self._state.set_current_frame(frame)
         self._load_current_frame()
+        if manual_active:
+            self._load_manual_edit_for_current_frame()
         # Update bookmark visual for new frame
         self._frame_navigator.update_mark_state(self._state.marked_frames)
 
@@ -1657,7 +1710,12 @@ class MainWindow(QMainWindow):
     # --- Smoothing handlers ---
 
     def _on_spatial_smooth(self, params: dict) -> None:
-        """Start spatial smoothing with parameters from the sidebar."""
+        """Start spatial smoothing with the chain-rule input directory.
+
+        Input directory is derived from step state:
+        - Step 0 done  → `manual_edited/`
+        - Otherwise    → `masks/`
+        """
         if self._smoothing is None or self._state is None:
             return
 
@@ -1669,17 +1727,18 @@ class MainWindow(QMainWindow):
             )
             return
 
-        masks_dir = os.path.join(output_dir, "masks")
-        if not os.path.isdir(masks_dir):
+        input_subdir = self._step_input_subdir(1)
+        input_dir = os.path.join(output_dir, input_subdir)
+        if not os.path.isdir(input_dir):
             self._show_error(
                 "Cannot Smooth",
-                f"Masks directory not found: {masks_dir}\n"
+                f"Input directory not found: {input_dir}\n"
                 "Run processing first.",
             )
             return
 
         if params.get("replace_originals"):
-            smooth_output = masks_dir  # write back in-place
+            smooth_output = os.path.join(output_dir, "masks")
         else:
             smooth_output = os.path.join(output_dir, "mask_spatial_smoothing")
 
@@ -1688,7 +1747,7 @@ class MainWindow(QMainWindow):
         self._smoothing_start_time = time.monotonic()
         self._state.set_state(self._state.State.POST_PROCESSING)
         self._smoothing.start_spatial(
-            input_dir=masks_dir,
+            input_dir=input_dir,
             output_dir=smooth_output,
             num_iterations=params.get("iterations", 50),
             dt=params.get("dt", 0.1),
@@ -1721,13 +1780,12 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_temporal_smooth(self, params: dict) -> None:
-        """Start temporal smoothing with parameters from the sidebar.
+        """Start temporal smoothing with the chain-rule input directory.
 
-        Before starting, checks whether spatial smoothing has been run
-        and warns the user accordingly:
-        - No spatial folder at all → warn, offer to proceed on raw masks
-        - Spatial folder exists from a previous session → ask whether to use it
-        - Spatial ran this session → chain automatically (no warning)
+        Input directory is derived from step state (see
+        ``_step_input_subdir``): the most recent previously-completed
+        step's output. The chain is deterministic — the user cannot
+        override the input via the mask-view dropdown.
         """
         if self._smoothing is None or self._state is None:
             return
@@ -1740,66 +1798,18 @@ class MainWindow(QMainWindow):
             )
             return
 
-        spatial_dir = os.path.join(output_dir, "mask_spatial_smoothing")
-        masks_dir = os.path.join(output_dir, "masks")
-        spatial_exists = (
-            os.path.isdir(spatial_dir) and bool(os.listdir(spatial_dir))
-        )
-
-        if not os.path.isdir(masks_dir):
+        input_subdir = self._step_input_subdir(2)
+        input_dir = os.path.join(output_dir, input_subdir)
+        if not os.path.isdir(input_dir):
             self._show_error(
                 "Cannot Smooth",
-                f"No mask directory found in:\n{output_dir}\n"
+                f"Input directory not found: {input_dir}\n"
                 "Run processing first.",
             )
             return
 
-        # --- Determine input source with user confirmation ---
-        if self._spatial_ran_this_session and spatial_exists:
-            # Best case: spatial was run this session, chain automatically
-            input_dir = spatial_dir
-        elif spatial_exists and not self._spatial_ran_this_session:
-            # Spatial folder exists from a previous session
-            reply = QMessageBox.question(
-                self,
-                "Use Previous Spatial Smoothing?",
-                "Spatial smoothing has not been run in this session,\n"
-                "but results from a previous session were found.\n\n"
-                "Use previous spatial smoothing results?\n\n"
-                "  Yes  \u2192  Chain from previous spatial results\n"
-                "  No   \u2192  Run on raw masks (skip spatial)",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Yes,
-            )
-            if reply == QMessageBox.StandardButton.Cancel:
-                return
-            input_dir = (
-                spatial_dir
-                if reply == QMessageBox.StandardButton.Yes
-                else masks_dir
-            )
-        else:
-            # No spatial results at all
-            reply = QMessageBox.warning(
-                self,
-                "Spatial Smoothing Not Run",
-                "Step 1 (Spatial Smoothing) has not been run yet.\n\n"
-                "Recommended workflow:\n"
-                "  1. Apply Spatial Smoothing first\n"
-                "  2. Then apply Temporal Smoothing\n\n"
-                "Proceed with temporal smoothing on raw masks anyway?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-            input_dir = masks_dir
-
         if params.get("replace_originals"):
-            smooth_output = masks_dir
+            smooth_output = os.path.join(output_dir, "masks")
         else:
             smooth_output = os.path.join(output_dir, "mask_temporal_smoothing")
 
@@ -1884,8 +1894,165 @@ class MainWindow(QMainWindow):
         self._status_bar.hide_processing_progress()
         self._show_error("Smoothing Error", error_msg)
 
+    # --- Step 0 manual edit: chain rule & handlers ---
+
+    # Fixed output-subdir per step (0 = Manual Edit, 1 = Spatial, 2 = Temporal)
+    _STEP_OUTPUT_SUBDIR = {
+        0: "manual_edited",
+        1: "mask_spatial_smoothing",
+        2: "mask_temporal_smoothing",
+    }
+
+    def _step_output_subdir(self, step: int) -> str:
+        """Return the fixed output subdirectory for a post-processing step."""
+        return self._STEP_OUTPUT_SUBDIR.get(step, "masks")
+
+    def _step_input_subdir(self, step: int) -> str:
+        """Return the input subdir for `step` following the chain rule.
+
+        Each step reads from the output of the most-recent previously
+        completed step. If no earlier step completed, it falls back to
+        the raw ``masks/`` directory.
+        """
+        for prev in range(step - 1, -1, -1):
+            if self._step_done.get(prev, False):
+                return self._step_output_subdir(prev)
+        return "masks"
+
+    def _is_manual_edit_active(self) -> bool:
+        """True when Step 0 is the currently active post-processing step."""
+        return (
+            self._sidebar is not None
+            and getattr(self._sidebar, "_pp_current_step", -1) == 0
+            and self._state is not None
+            and bool(self._state.output_dir)
+        )
+
+    def _manual_edit_dirs(self) -> tuple[str, str] | None:
+        """Return (source_dir, edit_dir) used by the manual edit controller.
+
+        Source is the chain-input subdir for Step 0 (always "masks/" for
+        now, but kept as a helper for future extension). Edit dir is the
+        fixed ``manual_edited/`` subdir.
+        """
+        if self._state is None or not self._state.output_dir:
+            return None
+        out = self._state.output_dir
+        source = os.path.join(out, self._step_input_subdir(0))
+        edit = os.path.join(out, self._step_output_subdir(0))
+        return source, edit
+
+    def _load_manual_edit_for_current_frame(self) -> None:
+        """Load the current frame into ``ManualEditController``."""
+        if not self._is_manual_edit_active() or self._state is None:
+            return
+        dirs = self._manual_edit_dirs()
+        if dirs is None:
+            return
+        source_dir, edit_dir = dirs
+        if not os.path.isdir(source_dir):
+            return
+        frame_idx = max(0, self._state.current_frame - 1)
+        self._manual_edit.load_frame(frame_idx, source_dir, edit_dir)
+
+    def _on_pp_step_advanced(self, step: int) -> None:
+        """Handle sidebar step Done/Skip. Flush edits and apply chain rule."""
+        if step == 0:
+            # Flush any pending edit for the current frame to disk.
+            self._manual_edit.save_frame_if_dirty()
+            # Leave mask edit mode on the canvas so normal viewing resumes.
+            self._canvas_area.set_mask_edit_mode(False)
+
+            # Consider Step 0 "done" only if something was actually
+            # written to the manual_edited/ directory. Skipping with no
+            # edits keeps the chain reading from masks/.
+            edit_dir = None
+            if self._state is not None and self._state.output_dir:
+                edit_dir = os.path.join(
+                    self._state.output_dir, self._step_output_subdir(0),
+                )
+            has_edits = bool(
+                edit_dir
+                and os.path.isdir(edit_dir)
+                and os.listdir(edit_dir)
+            )
+            self._step_done[0] = has_edits
+
+            if has_edits:
+                label = self._mask_subdir_to_label("manual_edited")
+                self._sidebar.add_mask_view_option(label)
+        elif step == 1:
+            self._step_done[1] = True
+        elif step == 2:
+            self._step_done[2] = True
+
+    def _on_manual_tool_changed(self, tool: str) -> None:
+        """Switch between brush and eraser on the canvas."""
+        self._manual_is_eraser = tool == "eraser"
+        self._canvas_area.set_mask_brush_tool(tool)
+
+    def _on_manual_brush_size_changed(self, radius: int) -> None:
+        """Update brush radius on the canvas panel and local state."""
+        self._manual_brush_radius = max(1, int(radius))
+        self._canvas_area.set_mask_brush_radius(self._manual_brush_radius)
+
+    def _on_manual_brush_begin(self, x: float, y: float) -> None:
+        """Forward brush-begin from canvas to controller."""
+        if not self._is_manual_edit_active():
+            return
+        self._manual_edit.begin_stroke(
+            x, y, self._manual_brush_radius, self._manual_is_eraser,
+        )
+
+    def _on_manual_brush_continue(self, x: float, y: float) -> None:
+        """Forward brush-continue from canvas to controller."""
+        if not self._is_manual_edit_active():
+            return
+        self._manual_edit.continue_stroke(x, y)
+
+    def _on_manual_brush_end(self) -> None:
+        """Forward brush-end from canvas to controller."""
+        if not self._is_manual_edit_active():
+            return
+        self._manual_edit.end_stroke()
+
+    def _on_manual_mask_modified(self, rect: QRect) -> None:
+        """Controller reported a dirty region — refresh mask + schedule overlay.
+
+        The mask panel gets an immediate update for responsive drawing
+        feedback; the more expensive overlay is rebuilt on a throttled
+        ~30 fps timer.
+        """
+        mask = self._manual_edit.current_mask
+        if mask is not None:
+            self._canvas_area.set_mask_image(mask)
+        if not self._manual_overlay_timer.isActive():
+            self._manual_overlay_timer.start()
+
+    def _refresh_overlay_from_manual_edit(self) -> None:
+        """Rebuild the overlay panel from the controller's in-memory mask."""
+        if self._state is None or self._state.current_original is None:
+            return
+        mask = self._manual_edit.current_mask
+        if mask is None:
+            return
+        from core.image_processing import create_overlay
+
+        overlay = create_overlay(
+            self._state.current_original,
+            mask,
+            alpha=self._state.overlay_alpha,
+            color=self._state.overlay_color,
+        )
+        self._canvas_area.set_overlay_image(overlay)
+
     def _on_mask_view_changed(self, subdir: str) -> None:
-        """Switch display to a different mask directory."""
+        """Switch display to a different mask directory (display-only).
+
+        The chain rule is driven by ``_step_done``, not by this dropdown,
+        so changing the view never affects which directory the next
+        step will read from.
+        """
         self._active_mask_subdir = subdir
         self._load_current_frame()
 
@@ -1894,6 +2061,7 @@ class MainWindow(QMainWindow):
         """Convert mask subdir name to a human-readable label."""
         mapping = {
             "masks": "Original (masks/)",
+            "manual_edited": "Manually Edited",
             "mask_spatial_smoothing": "Spatial Smoothed",
             "mask_temporal_smoothing": "Temporal Smoothed",
         }
@@ -1917,9 +2085,28 @@ class MainWindow(QMainWindow):
             )
 
     def _on_sidebar_panel_switched(self, panel: str) -> None:
-        """Refresh dynamic labels when user switches sidebar tabs."""
+        """Refresh dynamic labels when user switches sidebar tabs.
+
+        Also enters/exits Step 0 manual edit mode on the canvas: the
+        mask panel becomes brush-editable only while the user is on
+        the Post-Processing tab AND Step 0 is the active step.
+        """
         if panel == "postprocessing":
             self._update_temporal_source_label()
+            if self._is_manual_edit_active():
+                self._canvas_area.set_mask_edit_mode(
+                    True,
+                    "eraser" if self._manual_is_eraser else "brush",
+                )
+                self._canvas_area.set_mask_brush_radius(
+                    self._manual_brush_radius
+                )
+                self._load_manual_edit_for_current_frame()
+        else:
+            # Leaving the post-processing panel — flush any in-memory
+            # edit and leave mask edit mode.
+            self._manual_edit.save_frame_if_dirty()
+            self._canvas_area.set_mask_edit_mode(False)
 
     def _on_refresh_stats(self) -> None:
         """Compute and display mask statistics."""

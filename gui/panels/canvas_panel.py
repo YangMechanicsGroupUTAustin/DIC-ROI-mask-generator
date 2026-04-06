@@ -95,6 +95,11 @@ class _ImageView(QGraphicsView):
     zoom_changed = pyqtSignal(int)               # zoom percentage
     pan_changed = pyqtSignal(int, int)           # h_scroll, v_scroll
 
+    # Mask brush / eraser signals (image-space coordinates)
+    brush_stroke_begun = pyqtSignal(float, float)
+    brush_stroke_continued = pyqtSignal(float, float)
+    brush_stroke_ended = pyqtSignal()
+
     def __init__(self, scene: QGraphicsScene, parent: QWidget | None = None):
         super().__init__(scene, parent)
         self.setRenderHints(
@@ -119,12 +124,18 @@ class _ImageView(QGraphicsView):
         )
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)  # needed so brush cursor follows pointer
 
         self._is_interactive = False
         self._active_tool = "select"
         self._is_panning = False
         self._pan_start = QPointF()
         self._zoom_factor = 1.0
+
+        # Mask brush state
+        self._brush_radius: int = 10
+        self._brush_active: bool = False
+        self._brush_cursor_item: Optional[QGraphicsEllipseItem] = None
 
         # Shape drawing controller (set by CanvasPanel)
         self._shape_controller: ShapeDrawController | None = None
@@ -138,14 +149,68 @@ class _ImageView(QGraphicsView):
         self._shape_controller = ctrl
 
     def set_active_tool(self, tool: str) -> None:
-        """Set the active tool: 'select', 'draw', 'erase'."""
+        """Set the active tool.
+
+        Supported tools:
+            - 'select'  : annotation-point selection / drag (default)
+            - 'draw'    : add annotation points
+            - 'erase'   : remove annotation points on click
+            - 'brush'   : mask brush (paints 255)
+            - 'eraser'  : mask eraser (paints 0)
+        """
         self._active_tool = tool
         if tool == "draw":
             self.setCursor(Qt.CursorShape.CrossCursor)
+            self._hide_brush_cursor()
         elif tool == "erase":
             self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._hide_brush_cursor()
+        elif tool in ("brush", "eraser"):
+            # Hide the system cursor entirely — the scene-space circle
+            # overlay acts as the brush cursor so it scales with zoom.
+            self.setCursor(Qt.CursorShape.BlankCursor)
+            self._ensure_brush_cursor()
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._hide_brush_cursor()
+
+    def set_brush_radius(self, radius: int) -> None:
+        """Set the brush / eraser radius in image pixels."""
+        self._brush_radius = max(1, int(radius))
+        self._update_brush_cursor_geometry()
+
+    # --- Brush cursor helpers ---
+
+    def _ensure_brush_cursor(self) -> None:
+        """Lazily create the scene-space brush cursor overlay."""
+        if self._brush_cursor_item is None:
+            pen = QPen(QColor("#ffffff"))
+            pen.setCosmetic(True)  # constant 2 px screen width at any zoom
+            pen.setWidth(2)
+            item = QGraphicsEllipseItem()
+            item.setPen(pen)
+            item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            item.setZValue(1000)  # above everything else in the scene
+            item.setVisible(False)
+            self.scene().addItem(item)
+            self._brush_cursor_item = item
+        self._update_brush_cursor_geometry()
+
+    def _update_brush_cursor_geometry(self) -> None:
+        if self._brush_cursor_item is None:
+            return
+        r = self._brush_radius
+        self._brush_cursor_item.setRect(-r, -r, 2 * r, 2 * r)
+
+    def _hide_brush_cursor(self) -> None:
+        if self._brush_cursor_item is not None:
+            self._brush_cursor_item.setVisible(False)
+
+    def _show_brush_cursor_at(self, scene_pos: QPointF) -> None:
+        if self._brush_cursor_item is None:
+            return
+        self._brush_cursor_item.setPos(scene_pos)
+        self._brush_cursor_item.setVisible(True)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Zoom with mouse wheel."""
@@ -167,6 +232,14 @@ class _ImageView(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.pos())
+
+            # Mask brush / eraser takes priority when active — it is the
+            # only tool enabled on the (non-interactive) mask panel.
+            if self._active_tool in ("brush", "eraser"):
+                self._brush_active = True
+                self._show_brush_cursor_at(scene_pos)
+                self.brush_stroke_begun.emit(scene_pos.x(), scene_pos.y())
+                return
 
             # Shape drawing takes priority when active
             if (
@@ -216,9 +289,17 @@ class _ImageView(QGraphicsView):
             )
             return
 
+        scene_pos = self.mapToScene(event.pos())
+
+        # Brush / eraser: follow the pointer with a scene-space cursor.
+        if self._active_tool in ("brush", "eraser"):
+            self._show_brush_cursor_at(scene_pos)
+            if self._brush_active:
+                self.brush_stroke_continued.emit(scene_pos.x(), scene_pos.y())
+            return
+
         # Shape drawing move
         if self._shape_controller is not None and self._shape_controller.is_active:
-            scene_pos = self.mapToScene(event.pos())
             if self._shape_controller.handle_mouse_move(scene_pos):
                 return
 
@@ -227,7 +308,20 @@ class _ImageView(QGraphicsView):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.MiddleButton and self._is_panning:
             self._is_panning = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            # Restore the correct cursor for the active tool.
+            if self._active_tool in ("brush", "eraser"):
+                self.setCursor(Qt.CursorShape.BlankCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+
+        # Brush / eraser release: finalize the active stroke.
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._brush_active
+        ):
+            self._brush_active = False
+            self.brush_stroke_ended.emit()
             return
 
         # Shape drawing release
@@ -241,6 +335,12 @@ class _ImageView(QGraphicsView):
                 return
 
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        # Hide the brush cursor when the pointer leaves the viewport so
+        # the stale outline does not linger outside of the view.
+        self._hide_brush_cursor()
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         """Handle double-click for polygon close."""
@@ -306,6 +406,11 @@ class CanvasPanel(QWidget):
     # Shape drawing signals (forwarded from ShapeDrawController)
     shape_confirmed = pyqtSignal(str, str, tuple)  # mode, shape_type, points
     shape_drawing_cancelled = pyqtSignal()
+
+    # Mask brush / eraser signals (forwarded from _ImageView)
+    brush_stroke_begun = pyqtSignal(float, float)
+    brush_stroke_continued = pyqtSignal(float, float)
+    brush_stroke_ended = pyqtSignal()
 
     # Maximize/restore signal
     maximize_toggled = pyqtSignal(object)  # self (the panel requesting toggle)
@@ -422,6 +527,11 @@ class CanvasPanel(QWidget):
         )
         self._view.zoom_changed.connect(self.zoom_changed.emit)
         self._view.pan_changed.connect(self.pan_changed.emit)
+        self._view.brush_stroke_begun.connect(self.brush_stroke_begun.emit)
+        self._view.brush_stroke_continued.connect(
+            self.brush_stroke_continued.emit
+        )
+        self._view.brush_stroke_ended.connect(self.brush_stroke_ended.emit)
 
         # Shape drawing controller (only for interactive panels)
         self._shape_controller: ShapeDrawController | None = None
@@ -515,7 +625,7 @@ class CanvasPanel(QWidget):
             self._annotation_items.append(item)
 
     def set_active_tool(self, tool: str) -> None:
-        """Set active tool: 'select', 'draw', 'erase'."""
+        """Set active tool: 'select', 'draw', 'erase', 'brush', 'eraser'."""
         self._view.set_active_tool(tool)
         # Disable point dragging unless select tool
         for item in self._annotation_items:
@@ -523,6 +633,10 @@ class CanvasPanel(QWidget):
                 QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable,
                 tool == "select",
             )
+
+    def set_brush_radius(self, radius: int) -> None:
+        """Set the mask brush/eraser radius in image pixels."""
+        self._view.set_brush_radius(radius)
 
     def fit_to_view(self) -> None:
         """Fit image to view bounds."""

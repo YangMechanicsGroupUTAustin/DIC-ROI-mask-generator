@@ -46,6 +46,11 @@ class CanvasArea(QWidget):
     shape_confirmed = pyqtSignal(str, str, tuple)  # mode, shape_type, points
     shape_drawing_cancelled = pyqtSignal()
 
+    # Mask brush / eraser signals (forwarded from the mask panel)
+    brush_stroke_begun = pyqtSignal(float, float)
+    brush_stroke_continued = pyqtSignal(float, float)
+    brush_stroke_ended = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setSizePolicy(
@@ -215,6 +220,13 @@ class CanvasArea(QWidget):
         self._mask.zoom_changed.connect(
             lambda pct: self._on_panel_zoom_changed(self._mask, pct)
         )
+        # Forward brush signals so MainWindow can wire them to the
+        # ManualEditController without reaching into the panel directly.
+        self._mask.brush_stroke_begun.connect(self.brush_stroke_begun.emit)
+        self._mask.brush_stroke_continued.connect(
+            self.brush_stroke_continued.emit
+        )
+        self._mask.brush_stroke_ended.connect(self.brush_stroke_ended.emit)
         splitter.addWidget(self._mask)
 
         # Overlay
@@ -292,6 +304,30 @@ class CanvasArea(QWidget):
     def set_active_tool(self, tool: str) -> None:
         """Set the active tool on the interactive panel."""
         self._original.set_active_tool(tool)
+
+    # --- Mask edit (Step 0) API ---
+
+    def set_mask_edit_mode(self, enabled: bool, tool: str = "brush") -> None:
+        """Enable or disable mask brush editing on the Mask Preview panel.
+
+        When enabled, the mask panel activates `brush`/`eraser` tools that
+        emit `brush_stroke_*` signals. When disabled, the mask panel
+        reverts to the non-interactive default ("select").
+        """
+        if enabled:
+            self._mask.set_active_tool(tool)
+        else:
+            self._mask.set_active_tool("select")
+
+    def set_mask_brush_tool(self, tool: str) -> None:
+        """Switch between 'brush' and 'eraser' on the Mask Preview panel."""
+        if tool not in ("brush", "eraser"):
+            return
+        self._mask.set_active_tool(tool)
+
+    def set_mask_brush_radius(self, radius: int) -> None:
+        """Set the mask brush/eraser radius in image pixels."""
+        self._mask.set_brush_radius(radius)
 
     def clear_all(self) -> None:
         """Clear all three panels."""

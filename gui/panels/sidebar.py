@@ -121,6 +121,12 @@ class Sidebar(QWidget):
     mask_view_changed = pyqtSignal(str)  # subdir name: "masks", "mask_spatial_smoothing", etc.
     panel_switched = pyqtSignal(str)  # "processing" or "postprocessing"
 
+    # --- Step 0 manual edit signals ---
+    manual_tool_changed = pyqtSignal(str)       # "brush" or "eraser"
+    manual_brush_size_changed = pyqtSignal(int)  # radius in pixels
+    manual_undo_requested = pyqtSignal()
+    manual_redo_requested = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
 
@@ -796,8 +802,8 @@ class Sidebar(QWidget):
         )
 
         step0_info = QLabel(
-            "Manually fix mask errors before smoothing.\n"
-            "(Brush tools coming soon — skip for now)"
+            "Paint or erase directly on the Mask Preview.\n"
+            "Edits save to manual_edited/ on frame change."
         )
         step0_info.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; "
@@ -806,9 +812,79 @@ class Sidebar(QWidget):
         step0_info.setWordWrap(True)
         self._step0_section.add_widget(step0_info)
 
+        # ── Tool selector: Brush / Eraser (mutually exclusive) ──
+        step0_tools = QWidget()
+        step0_tools_layout = QHBoxLayout(step0_tools)
+        step0_tools_layout.setContentsMargins(0, 4, 0, 0)
+        step0_tools_layout.setSpacing(6)
+
+        self._manual_brush_btn = QPushButton("Brush")
+        self._manual_brush_btn.setCheckable(True)
+        self._manual_brush_btn.setChecked(True)
+        self._manual_brush_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_brush_btn.setProperty("cssClass", "btn-tool")
+        self._manual_brush_btn.setToolTip("Paint mask foreground (255).")
+        self._manual_brush_btn.clicked.connect(
+            lambda: self._on_manual_tool_selected("brush")
+        )
+        step0_tools_layout.addWidget(self._manual_brush_btn)
+
+        self._manual_eraser_btn = QPushButton("Eraser")
+        self._manual_eraser_btn.setCheckable(True)
+        self._manual_eraser_btn.setChecked(False)
+        self._manual_eraser_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_eraser_btn.setProperty("cssClass", "btn-tool")
+        self._manual_eraser_btn.setToolTip("Erase mask to background (0).")
+        self._manual_eraser_btn.clicked.connect(
+            lambda: self._on_manual_tool_selected("eraser")
+        )
+        step0_tools_layout.addWidget(self._manual_eraser_btn)
+
+        self._step0_section.add_widget(step0_tools)
+
+        # ── Brush size slider (1–100 px, default 10) ──
+        self._manual_brush_size = SliderInput(
+            "Brush Size",
+            default=10,
+            min_val=1,
+            max_val=100,
+            step=1,
+            decimals=0,
+            tooltip="Brush radius in pixels. Wheel reserved for canvas zoom.",
+        )
+        self._manual_brush_size.value_changed.connect(
+            self._on_manual_brush_size_changed
+        )
+        self._step0_section.add_widget(self._manual_brush_size)
+
+        # ── Undo / Redo row (disabled until first stroke) ──
+        step0_history = QWidget()
+        step0_history_layout = QHBoxLayout(step0_history)
+        step0_history_layout.setContentsMargins(0, 4, 0, 0)
+        step0_history_layout.setSpacing(6)
+
+        self._manual_undo_btn = QPushButton("Undo")
+        self._manual_undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_undo_btn.setProperty("cssClass", "btn-tool")
+        self._manual_undo_btn.setEnabled(False)
+        self._manual_undo_btn.setToolTip("Undo last stroke (per-frame, up to 20).")
+        self._manual_undo_btn.clicked.connect(self.manual_undo_requested.emit)
+        step0_history_layout.addWidget(self._manual_undo_btn)
+
+        self._manual_redo_btn = QPushButton("Redo")
+        self._manual_redo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_redo_btn.setProperty("cssClass", "btn-tool")
+        self._manual_redo_btn.setEnabled(False)
+        self._manual_redo_btn.setToolTip("Redo previously undone stroke.")
+        self._manual_redo_btn.clicked.connect(self.manual_redo_requested.emit)
+        step0_history_layout.addWidget(self._manual_redo_btn)
+
+        self._step0_section.add_widget(step0_history)
+
+        # ── Done / Skip row (existing navigation) ──
         step0_btns = QWidget()
         step0_btn_layout = QHBoxLayout(step0_btns)
-        step0_btn_layout.setContentsMargins(0, 0, 0, 0)
+        step0_btn_layout.setContentsMargins(0, 4, 0, 0)
         step0_btn_layout.setSpacing(8)
         self._step0_done_btn = QPushButton("Done")
         self._step0_done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1495,6 +1571,32 @@ class Sidebar(QWidget):
         }
         self.temporal_smooth_requested.emit(params)
 
+    # ── Step 0 manual edit controls ──
+
+    def _on_manual_tool_selected(self, tool: str) -> None:
+        """Handle Brush / Eraser toggle — enforce mutual exclusion."""
+        is_brush = tool == "brush"
+        self._manual_brush_btn.setChecked(is_brush)
+        self._manual_eraser_btn.setChecked(not is_brush)
+        self.manual_tool_changed.emit(tool)
+
+    def _on_manual_brush_size_changed(self, value: float) -> None:
+        """Re-emit the slider's float value as an integer radius."""
+        self.manual_brush_size_changed.emit(int(round(value)))
+
+    def set_manual_undo_state(self, can_undo: bool, can_redo: bool) -> None:
+        """Enable/disable Undo and Redo buttons (wired to controller signal)."""
+        self._manual_undo_btn.setEnabled(can_undo)
+        self._manual_redo_btn.setEnabled(can_redo)
+
+    def manual_current_tool(self) -> str:
+        """Return the currently selected manual edit tool."""
+        return "brush" if self._manual_brush_btn.isChecked() else "eraser"
+
+    def manual_current_brush_size(self) -> int:
+        """Return the current brush radius in pixels."""
+        return int(round(self._manual_brush_size.value()))
+
     # ── Step navigation ──
 
     def _advance_step(self, completed_step: int) -> None:
@@ -1539,6 +1641,7 @@ class Sidebar(QWidget):
     # Map display labels → directory names
     _MASK_VIEW_MAP = {
         "Original (masks/)": "masks",
+        "Manually Edited": "manual_edited",
         "Spatial Smoothed": "mask_spatial_smoothing",
         "Temporal Smoothed": "mask_temporal_smoothing",
     }
