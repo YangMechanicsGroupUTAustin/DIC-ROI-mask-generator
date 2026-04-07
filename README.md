@@ -16,7 +16,9 @@ Powered by [Meta SAM2](https://github.com/facebookresearch/sam2) with a full-fea
 | Capability | Details |
 |---|---|
 | **Interactive Annotation** | Point-based foreground/background marking with undo/redo history (up to 100 steps) |
-| **Mid-Sequence Correction** | Fix inaccurate masks on any frame and re-propagate forward — no need to reprocess the entire sequence |
+| **Mid-Sequence Correction** | Click *Add Correction*, drop points on the bad frame, set a range, then *Re-run Range* — only selected frames are recomputed |
+| **Step 0 Manual Edit** | Paint masks directly with a brush/eraser before smoothing — writes to `manual_edited/`, never overwrites originals |
+| **Early-Frame Refinement** | Reverse-propagate from a good anchor frame to clean up the earliest frames that SAM2 typically gets wrong |
 | **Multi-Model Support** | SAM2 Hiera Large / Base Plus / Small / Tiny — pick quality vs speed |
 | **GPU Acceleration** | CUDA auto-detection for NVIDIA GPUs (~100x faster than CPU) with real-time VRAM monitoring |
 | **28-Parameter Preprocessing** | Tone, smoothing, binarization, morphology, anisotropic diffusion — with 7 built-in presets including DIC Microscopy |
@@ -231,10 +233,28 @@ Both smoothing operations show a progress bar with ETA and auto-switch the displ
 
 After processing, if a mask is inaccurate on any frame:
 
-1. **Fix Mask** — Navigate to the problematic frame and click *Fix Mask* in the toolbar. Add correction foreground/background points on that frame.
-2. **Apply & Propagate** — Click *Apply & Propagate* to re-generate masks from the corrected frame forward. Only subsequent frames are recomputed — earlier frames remain unchanged.
+1. **Add Correction** — Navigate to the problematic frame and click *Add Correction* in the toolbar. Add foreground/background points on that frame — the first point dropped locks the **anchor frame**.
+2. **Re-run Range** — Adjust the **Range** spinboxes to set the correction window (start–end frame), then click *Re-run Range*. SAM2 re-propagates from the anchor frame to cover only the selected range.
 
 This is critical for long sequences (hundreds/thousands of frames) where errors accumulate: you can fix frame 500 without reprocessing frames 1–499.
+
+### Step 0: Manual Mask Edit
+
+Before running any smoothing, you can paint masks directly using a brush tool:
+
+- Available in the **Post-Processing panel → Step 0 · Manual Edit** section.
+- Toggle between **Brush** (paint white / foreground) and **Eraser** (paint black / background). Adjust brush size with the slider.
+- Edits are saved to `manual_edited/` on frame change — original masks are never overwritten.
+- Smart chaining: downstream smoothing steps automatically read from `manual_edited/` when present.
+
+### Early-Frame Refinement
+
+SAM2's earliest frames often have the worst mask quality because frame 0 has no prior memory context to attend to, and its errors propagate forward through the sequence.
+
+Early-Frame Refinement fixes this by selecting a good **anchor frame** from later in the sequence, then **reverse-propagating** back to frame 0. Only the earliest K frames are overwritten; all other frames remain unchanged.
+
+- Available in the **Post-Processing panel → Early-Frame Refinement** section.
+- Enable the checkbox, choose the anchor frame and overwrite count, then run.
 
 ### Model Configuration
 
@@ -273,6 +293,8 @@ Mask_generater/
 ├── controllers/                   # MVC controllers
 │   ├── app_state.py               # Central state manager (signals)
 │   ├── annotation_controller.py   # Undo/redo command pattern
+│   ├── correction_controller.py   # Correction range state machine
+│   ├── manual_edit_controller.py  # Step 0 brush/eraser mask editing
 │   ├── processing_controller.py   # SAM2 processing orchestration
 │   ├── smoothing_controller.py    # Spatial/temporal smoothing workers
 │   ├── preview_controller.py      # Preprocessing preview rendering
@@ -407,7 +429,7 @@ output/
 
 ## Testing
 
-The project includes 232 tests covering core algorithms, UI widgets, state management, and integration:
+The project includes 360 tests covering core algorithms, UI widgets, state management, and integration:
 
 ```bash
 python -m pytest tests/ -v

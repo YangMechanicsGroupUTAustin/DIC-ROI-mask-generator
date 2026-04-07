@@ -7,7 +7,7 @@
 3. [Complete Workflow](#3-complete-workflow)
 4. [Preprocessing Pipeline](#4-preprocessing-pipeline)
 5. [SAM2 Processing](#5-sam2-processing)
-6. [Post-Processing (Smoothing)](#6-post-processing-smoothing)
+6. [Post-Processing (Smoothing)](#6-post-processing-smoothing) — Step 0 Manual Edit, Early-Frame Refinement, Spatial & Temporal Smoothing
 7. [Project Management](#7-project-management)
 8. [Batch Processing](#8-batch-processing)
 9. [Contour Export](#9-contour-export)
@@ -98,9 +98,10 @@ All three panels share zoom and pan state — scrolling or zooming one panel upd
 
 | Tool | Key | Function |
 |------|-----|----------|
-| Select | `V` | Place foreground (positive) annotation points |
-| Draw | `D` | Place background (negative) annotation points |
-| Erase | `E` | Enter correction mode for re-propagation |
+| Select | `V` | Select / move existing annotation points |
+| Draw | `D` | Add new annotation points (foreground or background, per current mode) |
+| Erase | `E` | Remove individual annotation points by clicking them |
+| Foreground / Background | `Space` | Toggle whether new points mark foreground (include) or background (exclude) |
 
 ### Status Bar
 
@@ -169,9 +170,10 @@ After processing completes:
 If masks are inaccurate on certain frames:
 
 1. Navigate to the problematic frame.
-2. Press `E` to enter correction mode.
-3. Add new foreground/background points on that frame.
-4. Click **Start Processing** — SAM2 re-propagates from the corrected frame.
+2. Click **Add Correction** in the toolbar to enter correction mode.
+3. Add new foreground/background points on that frame — the first point dropped locks the **anchor frame**.
+4. Adjust the **Range** spinboxes (start–end) to define which frames to overwrite.
+5. Click **Re-run Range** — SAM2 re-propagates from the anchor frame to cover the selected range.
 
 ### Step 8: Post-Process
 
@@ -340,9 +342,10 @@ The **Mask Threshold** slider controls the logit cutoff for binarization:
 After initial processing, you can refine results on any frame:
 
 1. Navigate to a frame with inaccurate masks.
-2. Press `E` to enter correction mode.
-3. Add/adjust annotation points.
-4. Press `Ctrl+Enter` — SAM2 re-propagates from this frame forward and backward.
+2. Click **Add Correction** in the toolbar.
+3. Add/adjust annotation points — the first point dropped sets the **anchor frame**.
+4. Set the **Range** spinboxes in the toolbar to define which frames to overwrite.
+5. Click **Re-run Range** — SAM2 re-propagates from the anchor frame to cover the selected range.
 
 This is particularly useful for long sequences where error accumulates.
 
@@ -350,7 +353,36 @@ This is particularly useful for long sequences where error accumulates.
 
 ## 6. Post-Processing (Smoothing)
 
-After segmentation, switch to the **Post-Processing** panel for mask refinement. Both smoothing operations process **all mask files** in the `masks/` directory.
+After segmentation, switch to the **Post-Processing** panel for mask refinement. The panel contains four sequential steps: **Step 0 · Manual Edit**, **Early-Frame Refinement**, **Step 1 · Spatial Smoothing**, and **Step 2 · Temporal Smoothing**. Each step feeds into the next via smart chaining.
+
+### Step 0: Manual Mask Edit
+
+The **Step 0 · Manual Edit** section lets you paint directly on any mask before running automated smoothing.
+
+| Control | Description |
+|---------|-------------|
+| **Brush** | Paints white (foreground) onto the mask |
+| **Eraser** | Paints black (background) onto the mask |
+| **Brush Size** | Radius in pixels (1–100, default 10) |
+
+- Edits are saved automatically to `manual_edited/` on frame change or when you leave Step 0.
+- Original masks in `masks/` are **never overwritten**.
+- Downstream steps (Spatial and Temporal Smoothing) automatically read from `manual_edited/` when present.
+
+### Early-Frame Refinement
+
+SAM2's earliest frames often have the worst mask quality. Because frame 0 has no prior memory context, its mask is typically the least accurate — and errors from frame 0 can propagate forward through the entire sequence.
+
+**Early-Frame Refinement** fixes this by:
+1. Taking a good **anchor frame** from later in the sequence (one with a reliable mask).
+2. Running a **reverse-propagation** pass from that anchor back to frame 0.
+3. Overwriting only the earliest K frames — all other frames are unchanged.
+
+| Control | Description |
+|---------|-------------|
+| **Enable** checkbox | Activates the refinement pass |
+| **Anchor Frame** | The frame whose mask is used as the reverse-propagation source (must be > 0) |
+| **Overwrite Count (K)** | How many of the earliest frames to replace (1 ≤ K ≤ anchor frame) |
 
 ### How Smoothing Results Are Displayed
 
