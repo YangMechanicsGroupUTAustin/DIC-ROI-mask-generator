@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QWidget,
 )
 
@@ -111,6 +113,7 @@ class Toolbar(QWidget):
     load_requested = pyqtSignal()
     add_correction_requested = pyqtSignal()
     apply_correction_requested = pyqtSignal()
+    correction_range_changed = pyqtSignal(int, int)  # (start, end), 1-based inclusive
     start_processing_requested = pyqtSignal()
     stop_processing_requested = pyqtSignal()
     force_reprocess_changed = pyqtSignal(bool)
@@ -253,30 +256,73 @@ class Toolbar(QWidget):
         # Spacer
         layout.addStretch()
 
-        # --- Mask Correction (2-step workflow) ---
+        # --- Mask Correction (range-based 2-step workflow) ---
         self._add_correction_btn = ToolButton(
-            "plus-circle", "Fix Mask"
+            "plus-circle", "Add Correction"
         )
         self._add_correction_btn.setToolTip(
-            "Step 1: Fix Mask on Current Frame\n"
+            "Step 1: Add Correction\n"
             "Navigate to a frame with an inaccurate mask, then\n"
-            "click this to add correction points.\n"
-            "Use Foreground/Background to mark include/exclude areas.\n"
-            "When done, click 'Apply & Propagate' (step 2)."
+            "click this to enter correction mode. Drop Foreground/\n"
+            "Background points on that frame to mark the fix.\n"
+            "The first point you drop locks the anchor frame."
         )
         self._add_correction_btn.clicked.connect(
             self.add_correction_requested.emit
         )
         layout.addWidget(self._add_correction_btn)
 
+        # Range spin boxes between the two action buttons.
+        # Guard flag so programmatic updates don't re-emit the user signal.
+        self._suppress_range_signal: bool = False
+
+        range_label = QLabel("Range:")
+        range_label.setStyleSheet(
+            f"QLabel {{ color: {Colors.TEXT_DIM}; "
+            f"font-size: {Fonts.SIZE_SM}px; background: transparent; "
+            f"padding: 0 4px; }}"
+        )
+        layout.addWidget(range_label)
+
+        self._range_start_spin = QSpinBox()
+        self._range_start_spin.setMinimum(1)
+        self._range_start_spin.setMaximum(1)
+        self._range_start_spin.setValue(1)
+        self._range_start_spin.setFixedWidth(64)
+        self._range_start_spin.setEnabled(False)
+        self._range_start_spin.setToolTip(
+            "Correction range start (1-based, inclusive)."
+        )
+        self._range_start_spin.valueChanged.connect(self._on_range_spin_changed)
+        layout.addWidget(self._range_start_spin)
+
+        dash_label = QLabel("–")
+        dash_label.setStyleSheet(
+            f"QLabel {{ color: {Colors.TEXT_DIM}; "
+            f"font-size: {Fonts.SIZE_SM}px; background: transparent; }}"
+        )
+        layout.addWidget(dash_label)
+
+        self._range_end_spin = QSpinBox()
+        self._range_end_spin.setMinimum(1)
+        self._range_end_spin.setMaximum(1)
+        self._range_end_spin.setValue(1)
+        self._range_end_spin.setFixedWidth(64)
+        self._range_end_spin.setEnabled(False)
+        self._range_end_spin.setToolTip(
+            "Correction range end (1-based, inclusive)."
+        )
+        self._range_end_spin.valueChanged.connect(self._on_range_spin_changed)
+        layout.addWidget(self._range_end_spin)
+
         self._apply_correction_btn = ToolButton(
-            "check-circle", "Apply & Propagate", variant="success"
+            "check-circle", "Re-run Range", variant="success"
         )
         self._apply_correction_btn.setToolTip(
-            "Step 2: Apply & Propagate\n"
-            "Re-generate masks from the corrected frame\n"
-            "forward through all remaining frames.\n"
-            "Only available after adding correction points."
+            "Step 2: Re-run Range\n"
+            "Re-propagate SAM2 forward and/or backward from the\n"
+            "anchor frame to cover the selected range. Only frames\n"
+            "inside [start, end] are overwritten."
         )
         self._apply_correction_btn.clicked.connect(
             self.apply_correction_requested.emit
@@ -363,6 +409,38 @@ class Toolbar(QWidget):
         else:
             self._bg_btn.setChecked(True)
 
+    def set_correction_frame_count(self, total: int) -> None:
+        """Update the max value on both range spin boxes.
+
+        Safe to call with total < 1 — clamps to 1.
+        Does not emit correction_range_changed.
+        """
+        total = max(1, int(total))
+        self._suppress_range_signal = True
+        try:
+            self._range_start_spin.setMaximum(total)
+            self._range_end_spin.setMaximum(total)
+        finally:
+            self._suppress_range_signal = False
+
+    def set_correction_range(self, start: int, end: int) -> None:
+        """Programmatically set [start, end] on the two spin boxes.
+
+        Does NOT emit correction_range_changed — use this for echoing
+        CorrectionController state back to the UI.
+        """
+        self._suppress_range_signal = True
+        try:
+            self._range_start_spin.setValue(int(start))
+            self._range_end_spin.setValue(int(end))
+        finally:
+            self._suppress_range_signal = False
+
+    def set_correction_range_enabled(self, enabled: bool) -> None:
+        """Enable/disable the two range spin boxes."""
+        self._range_start_spin.setEnabled(bool(enabled))
+        self._range_end_spin.setEnabled(bool(enabled))
+
     # --- Private slots ---
 
     def _on_tool_clicked(self, btn_id: int) -> None:
@@ -372,3 +450,17 @@ class Toolbar(QWidget):
     def _on_mode_clicked(self, btn_id: int) -> None:
         mode_names = {0: "foreground", 1: "background"}
         self.mode_changed.emit(mode_names.get(btn_id, "foreground"))
+
+    def _on_range_spin_changed(self, _value: int) -> None:
+        """Forward user-driven spin box edits to the controller.
+
+        Swallowed when `_suppress_range_signal` is set (programmatic update).
+        The controller is the source of truth for range validation — this
+        just forwards the current `(start, end)` pair.
+        """
+        if self._suppress_range_signal:
+            return
+        self.correction_range_changed.emit(
+            self._range_start_spin.value(),
+            self._range_end_spin.value(),
+        )
