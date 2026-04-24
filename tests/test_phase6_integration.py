@@ -46,7 +46,7 @@ class MockProcessingController(QObject):
     def is_running(self):
         return self._running
 
-    def start_processing(self):
+    def start_processing(self, skip_existing: bool = False):
         self.start_processing_called = True
         self._running = True
 
@@ -54,9 +54,25 @@ class MockProcessingController(QObject):
         self.stop_processing_called = True
         self._running = False
 
-    def start_correction(self, frame_idx, points, labels):
-        self.start_correction_calls.append((frame_idx, points, labels))
+    def start_correction(
+        self,
+        anchor_frame_idx,
+        range_start,
+        range_end,
+        points,
+        labels,
+    ):
+        self.start_correction_calls.append(
+            (anchor_frame_idx, range_start, range_end, points, labels)
+        )
         self._running = True
+
+    @property
+    def _mask_generator(self):
+        """Mock mask generator for correction validation."""
+        class _MockMG:
+            is_initialized = False
+        return _MockMG()
 
 
 class MockSmoothingController(QObject):
@@ -276,6 +292,7 @@ class TestMainWindowProcessingValidation:
 
     def test_no_images_shows_error(self, wired_window, state, processing_ctrl):
         """Start processing with no images should show error, not start."""
+        state._image_files = []  # Ensure no images loaded
         with patch.object(wired_window, '_show_error') as mock_err:
             wired_window._on_start_processing()
             mock_err.assert_called_once()
@@ -285,6 +302,7 @@ class TestMainWindowProcessingValidation:
     def test_no_output_dir_shows_error(self, wired_window, state, processing_ctrl):
         """Start processing with no output dir should show error."""
         state._image_files = ["a.png"]
+        state._output_dir = ""  # Ensure no output dir
         with patch.object(wired_window, '_show_error') as mock_err:
             wired_window._on_start_processing()
             mock_err.assert_called_once()
@@ -295,6 +313,8 @@ class TestMainWindowProcessingValidation:
         """Start processing with no points should show error."""
         state._image_files = ["a.png"]
         state._output_dir = "/tmp/out"
+        state._points = []  # Ensure no points
+        state._labels = []
         with patch.object(wired_window, '_show_error') as mock_err:
             wired_window._on_start_processing()
             mock_err.assert_called_once()
@@ -313,12 +333,13 @@ class TestMainWindowProcessingValidation:
 class TestMainWindowCorrectionHandlers:
     """Test correction-related handlers."""
 
-    def test_add_correction_transitions(self, wired_window, state):
-        """_on_add_correction should transition to CORRECTION state."""
+    def test_add_correction_blocked_without_model(self, wired_window, state):
+        """_on_add_correction should NOT transition without initialized model."""
         from controllers.app_state import AppState
         state.set_state(AppState.State.REVIEWING)
         wired_window._on_add_correction()
-        assert state.state == AppState.State.CORRECTION
+        # Model is not initialized in mock, so state stays REVIEWING
+        assert state.state == AppState.State.REVIEWING
 
     def test_apply_correction_no_points(self, wired_window, state, processing_ctrl):
         """_on_apply_correction with no points should show error."""
@@ -336,11 +357,22 @@ class TestMainWindowCorrectionHandlers:
         state.add_point(50.0, 60.0, 1)
         state.set_state(AppState.State.CORRECTION)
 
+        # Seed the correction controller: enter correction at frame 3,
+        # then lock the anchor by registering the first point on frame 3.
+        # Both values are 1-based to match the UI convention.
+        wired_window._corr_ctrl.on_enter_correction(
+            current_frame=3, total_frames=5,
+        )
+        assert wired_window._corr_ctrl.try_add_point(3) is True
+
         wired_window._on_apply_correction()
 
         assert len(processing_ctrl.start_correction_calls) == 1
-        frame_idx, pts, lbls = processing_ctrl.start_correction_calls[0]
-        assert frame_idx == 2  # current_frame(3) - 1 = 0-based index 2
+        anchor, start, end, pts, lbls = processing_ctrl.start_correction_calls[0]
+        # 1-based anchor 3 → 0-based index 2; default range [cur, cur]
+        assert anchor == 2
+        assert start == 2
+        assert end == 2
         assert pts == [[50.0, 60.0]]
         assert lbls == [1]
 
@@ -637,3 +669,96 @@ class TestAnnotationControllerEdgeCases:
         annotation_ctrl.set_point_mode("background")
         annotation_ctrl.add_point(3.0, 4.0)
         assert state.labels[-1] == 0
+
+
+# =============================================================================
+# Phase E: Refine Settings Wiring (Sidebar <-> AppState)
+# =============================================================================
+
+class TestMainWindowRefineWiring:
+    """Verify two-way binding of refine settings between Sidebar and AppState."""
+
+    def test_sidebar_toggle_propagates_to_state(self, wired_window, state):
+        """User checking the box must update AppState."""
+        wired_window.sidebar._refine_enabled_check.setChecked(True)
+        assert state.refine_enabled is True
+        wired_window.sidebar._refine_enabled_check.setChecked(False)
+        assert state.refine_enabled is False
+
+    def test_state_toggle_propagates_to_sidebar(self, wired_window, state):
+        """Programmatic AppState change must mirror into the checkbox."""
+        state.set_refine_enabled(True)
+        assert wired_window.sidebar._refine_enabled_check.isChecked() is True
+        state.set_refine_enabled(False)
+        assert wired_window.sidebar._refine_enabled_check.isChecked() is False
+
+    def test_sidebar_anchor_change_propagates_to_state(
+        self, wired_window, state,
+    ):
+        # Need at least 20 frames so anchor=15 is in range.
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        wired_window.sidebar._refine_anchor_input._spinbox.setValue(15)
+        assert state.refine_anchor_frame == 15
+
+    def test_state_anchor_change_propagates_to_sidebar(
+        self, wired_window, state,
+    ):
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_refine_anchor_frame(8)
+        sidebar_value = int(
+            wired_window.sidebar._refine_anchor_input.value()
+        )
+        assert sidebar_value == 8
+
+    def test_sidebar_overwrite_change_propagates_to_state(
+        self, wired_window, state,
+    ):
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        wired_window.sidebar._refine_overwrite_input._spinbox.setValue(7)
+        assert state.refine_overwrite_count == 7
+
+    def test_state_overwrite_change_propagates_to_sidebar(
+        self, wired_window, state,
+    ):
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_refine_overwrite_count(6)
+        sidebar_value = int(
+            wired_window.sidebar._refine_overwrite_input.value()
+        )
+        assert sidebar_value == 6
+
+    def test_no_signal_loop_on_state_update(self, wired_window, state):
+        """If state -> sidebar -> state echoed, the value would change twice.
+
+        Set state, then check that state's value matches what we set --
+        no echo from the sidebar feedback loop.
+        """
+        state.set_image_files([f"f{i}.png" for i in range(20)])
+        state.set_refine_anchor_frame(12)
+        # If there's a loop, the cascade in set_refine_anchor_frame might
+        # produce a different value. Confirm the round-trip is stable.
+        assert state.refine_anchor_frame == 12
+
+    def test_image_files_change_updates_anchor_max(
+        self, wired_window, state,
+    ):
+        """Loading a sequence must lift the anchor spinbox max to total."""
+        state.set_image_files([f"f{i}.png" for i in range(50)])
+        anchor_max = wired_window.sidebar._refine_anchor_input._spinbox.maximum()
+        assert anchor_max == 50
+
+    def test_image_files_change_updates_overwrite_max(
+        self, wired_window, state,
+    ):
+        """Loading a sequence must update the overwrite spinbox max to anchor."""
+        state.set_image_files([f"f{i}.png" for i in range(50)])
+        # After load, anchor is min(10, 50) = 10, so overwrite max = 10.
+        ow_max = wired_window.sidebar._refine_overwrite_input._spinbox.maximum()
+        assert ow_max == 10
+
+    def test_anchor_change_updates_overwrite_max(self, wired_window, state):
+        """Manually raising anchor must lift the overwrite spinbox max."""
+        state.set_image_files([f"f{i}.png" for i in range(50)])
+        state.set_refine_anchor_frame(25)
+        ow_max = wired_window.sidebar._refine_overwrite_input._spinbox.maximum()
+        assert ow_max == 25

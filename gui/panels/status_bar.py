@@ -108,6 +108,33 @@ class StatusBar(QWidget):
         self._vram_bar.setTextVisible(False)
         layout.addWidget(self._vram_bar)
 
+        # --- Processing progress (hidden until processing starts) ---
+        self._progress_container = QWidget()
+        self._progress_container.setStyleSheet("background: transparent;")
+        progress_layout = QHBoxLayout(self._progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(6)
+
+        progress_layout.addWidget(_create_divider())
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedWidth(100)
+        self._progress_bar.setFixedHeight(4)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(False)
+        progress_layout.addWidget(self._progress_bar)
+
+        self._progress_label = QLabel("")
+        self._progress_label.setStyleSheet(
+            f"color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent;"
+        )
+        progress_layout.addWidget(self._progress_label)
+
+        self._progress_container.setVisible(False)
+        layout.addWidget(self._progress_container)
+
         # Spacer
         layout.addStretch()
 
@@ -158,6 +185,38 @@ class StatusBar(QWidget):
             self._vram_bar.setValue(min(100, percent))
         else:
             self._vram_bar.setValue(0)
+
+    def set_processing_progress(
+        self, current: int, total: int, eta_text: str = "",
+    ) -> None:
+        """Update the processing progress bar and ETA label.
+
+        Args:
+            current: Number of items processed so far.
+            total: Total number of items.
+            eta_text: Formatted ETA string (e.g. "~30s remaining").
+        """
+        if total <= 0:
+            # Indeterminate progress (e.g. model loading)
+            self._progress_bar.setRange(0, 0)
+            self._progress_label.setText(eta_text or "Initializing...")
+            self._progress_container.setVisible(True)
+            return
+
+        percent = int((current / total) * 100)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(min(100, percent))
+        label = f"Frame {current}/{total}"
+        if eta_text:
+            label += f" \u2022 {eta_text}"
+        self._progress_label.setText(label)
+        self._progress_container.setVisible(True)
+
+    def hide_processing_progress(self) -> None:
+        """Hide the processing progress bar."""
+        self._progress_container.setVisible(False)
+        self._progress_bar.setValue(0)
+        self._progress_label.setText("")
 
     def start_timer(self) -> None:
         """Start the elapsed time timer."""

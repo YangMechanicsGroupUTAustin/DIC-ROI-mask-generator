@@ -1,4 +1,4 @@
-"""Structured logging configuration for SAM2 Studio."""
+"""Structured logging configuration for DIC Mask Generator."""
 
 import logging
 import os

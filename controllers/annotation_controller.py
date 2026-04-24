@@ -183,8 +183,13 @@ class AnnotationController(QObject):
         self.can_undo_changed.emit(self.can_undo)
         self.can_redo_changed.emit(self.can_redo)
 
-    def save_config(self, filepath: str) -> None:
-        """Save current annotations to file."""
+    def save_config(self, filepath: str, shapes: list | None = None) -> None:
+        """Save current annotations to file.
+
+        Args:
+            filepath: Target JSON file path.
+            shapes: Optional list of ShapeOverlay objects to persist.
+        """
         from core.annotation_config import save_annotation_config
         save_annotation_config(
             filepath,
@@ -196,10 +201,15 @@ class AnnotationController(QObject):
             start_frame=self._state.start_frame,
             end_frame=self._state.end_frame,
             intermediate_format=self._state.intermediate_format,
+            shapes=shapes,
         )
 
-    def load_config(self, filepath: str) -> None:
-        """Load annotations from file, replacing current state."""
+    def load_config(self, filepath: str) -> list:
+        """Load annotations from file, replacing current state.
+
+        Returns a list of shape dicts (may be empty) for the caller
+        to restore into the ShapeController.
+        """
         from core.annotation_config import load_annotation_config
         config = load_annotation_config(filepath)
         annotation = config["annotation"]
@@ -220,3 +230,5 @@ class AnnotationController(QObject):
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._emit_state()
+
+        return config.get("shapes", [])

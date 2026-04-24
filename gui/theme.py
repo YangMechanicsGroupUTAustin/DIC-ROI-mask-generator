@@ -1,4 +1,4 @@
-"""Dark theme stylesheet system for SAM2 Studio.
+"""Dark theme stylesheet system for DIC Mask Generator.
 
 Color palette derived from Figma reference design.
 All colors, fonts, and QSS styling defined here.
@@ -231,10 +231,26 @@ def generate_stylesheet() -> str:
     QComboBox QAbstractItemView {{
         background-color: {c.BG_INPUT};
         color: {c.TEXT_PRIMARY};
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.12);
         selection-background-color: {c.PRIMARY_BG};
         selection-color: {c.PRIMARY};
         outline: none;
+        padding: 4px 0;
+    }}
+    QComboBox QAbstractItemView::item {{
+        background-color: {c.BG_INPUT};
+        color: {c.TEXT_PRIMARY};
+        padding: 6px 12px;
+        min-height: 22px;
+        border: none;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background-color: #262832;
+        color: {c.TEXT_PRIMARY};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: {c.PRIMARY_BG};
+        color: {c.PRIMARY};
     }}
 
     /* === Spin Box / Double Spin Box === */

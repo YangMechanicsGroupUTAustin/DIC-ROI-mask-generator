@@ -32,9 +32,12 @@ class NumberInput(QWidget):
         decimals: int = 1,
         unit: str = "",
         icon_name: str = "",
+        tooltip: str = "",
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
+        if tooltip:
+            self.setToolTip(tooltip)
         self._decimals = decimals
 
         layout = QVBoxLayout(self)

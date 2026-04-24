@@ -8,3 +8,19 @@ build/
 *.pth
 .pytest_cache/
 logs/
+
+# Dev-only directories
+.claude/
+GUI_reference/
+prototype_out/
+scripts/
+tasks/
+test_projects/
+
+# Untracked example data (not ready to publish)
+examples/example1/
+examples/example2/
+
+# Generated output artifacts in examples
+examples/*/processing_summary.json
+examples/*/run_*/

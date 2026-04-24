@@ -27,9 +27,12 @@ class SelectField(QWidget):
         options: list[str],
         default: str = "",
         icon_name: str = "",
+        tooltip: str = "",
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
+        if tooltip:
+            self.setToolTip(tooltip)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -73,6 +76,15 @@ class SelectField(QWidget):
         index = self._combo.findText(value)
         if index >= 0:
             self._combo.setCurrentIndex(index)
+
+    def options(self) -> list[str]:
+        """Return the list of current option strings."""
+        return [self._combo.itemText(i) for i in range(self._combo.count())]
+
+    def add_option(self, option: str) -> None:
+        """Append a single option if not already present."""
+        if self._combo.findText(option) < 0:
+            self._combo.addItem(option)
 
     def set_options(self, options: list[str]) -> None:
         """Replace all options in the combo box."""

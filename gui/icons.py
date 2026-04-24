@@ -1,4 +1,4 @@
-"""SVG icon system for SAM2 Studio.
+"""SVG icon system for DIC Mask Generator.
 
 Provides inline SVG icons rendered as QIcon/QPixmap.
 Based on Lucide icon set (MIT license).
@@ -144,6 +144,12 @@ _ICONS: dict[str, str] = {
         '<line x1="21" x2="14" y1="3" y2="10"/>'
         '<line x1="3" x2="10" y1="21" y2="14"/>'
     ),
+    "minimize": (
+        '<polyline points="4 14 10 14 10 20"/>'
+        '<polyline points="20 10 14 10 14 4"/>'
+        '<line x1="14" x2="21" y1="10" y2="3"/>'
+        '<line x1="3" x2="10" y1="21" y2="14"/>'
+    ),
     "zoom-in": (
         '<circle cx="11" cy="11" r="8"/>'
         '<line x1="21" x2="16.65" y1="21" y2="16.65"/>'
@@ -191,6 +197,21 @@ _ICONS: dict[str, str] = {
         '<circle cx="12" cy="12" r="10"/>'
         '<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>'
         '<path d="M12 17h.01"/>'
+    ),
+    "bookmark": (
+        '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>'
+    ),
+    "skip-back": (
+        '<polygon points="19 20 9 12 19 4 19 20"/>'
+        '<line x1="5" x2="5" y1="19" y2="5"/>'
+    ),
+    "skip-forward": (
+        '<polygon points="5 4 15 12 5 20 5 4"/>'
+        '<line x1="19" x2="19" y1="5" y2="19"/>'
+    ),
+    "columns": (
+        '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>'
+        '<line x1="12" x2="12" y1="3" y2="21"/>'
     ),
 }
 

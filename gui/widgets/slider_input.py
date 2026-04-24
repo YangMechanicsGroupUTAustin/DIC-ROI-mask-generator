@@ -28,9 +28,12 @@ class SliderInput(QWidget):
         max_val: float = 1,
         step: float = 0.01,
         decimals: int = 2,
+        tooltip: str = "",
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
+        if tooltip:
+            self.setToolTip(tooltip)
         self._min_val = min_val
         self._max_val = max_val
         self._step = step
@@ -49,7 +52,7 @@ class SliderInput(QWidget):
 
         text_label = QLabel(label)
         text_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_SM}px; "
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_BASE}px; "
             f"background: transparent;"
         )
         top_row.addWidget(text_label)
@@ -57,8 +60,9 @@ class SliderInput(QWidget):
 
         self._value_label = QLabel()
         self._value_label.setStyleSheet(
-            f"color: {Colors.PRIMARY}; font-family: '{Fonts.MONO}'; "
-            f"font-size: {Fonts.SIZE_BASE}px; background: transparent;"
+            f"color: {Colors.PRIMARY_HOVER}; font-family: '{Fonts.MONO}'; "
+            f"font-size: {Fonts.SIZE_MD}px; font-weight: bold; "
+            f"background: transparent;"
         )
         top_row.addWidget(self._value_label)
         layout.addLayout(top_row)

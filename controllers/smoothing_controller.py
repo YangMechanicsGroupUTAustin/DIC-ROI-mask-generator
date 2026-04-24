@@ -19,6 +19,10 @@ from core.image_processing import get_image_files
 logger = logging.getLogger("sam2studio.smoothing_controller")
 
 
+class _SmoothingAbort(Exception):
+    """Raised inside a worker to signal a non-exception abort (e.g. no input files)."""
+
+
 class SpatialSmoothWorker(QThread):
     """Background worker for spatial smoothing of mask files."""
     progress = pyqtSignal(int, int)       # current, total
@@ -33,7 +37,7 @@ class SpatialSmoothWorker(QThread):
         dt: float = 0.1,
         kappa: float = 30.0,
         option: int = 1,
-        post_gaussian_sigma: float = 0.0,
+        gaussian_sigma: float = 2.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -43,7 +47,7 @@ class SpatialSmoothWorker(QThread):
         self._dt = dt
         self._kappa = kappa
         self._option = option
-        self._post_gaussian_sigma = post_gaussian_sigma
+        self._gaussian_sigma = gaussian_sigma
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -53,10 +57,13 @@ class SpatialSmoothWorker(QThread):
     def run(self):
         try:
             self._run_smoothing()
+        except _SmoothingAbort as e:
+            self.error.emit(str(e))
+            return
         except Exception as e:
             logger.exception("Spatial smoothing failed")
             self.error.emit(str(e))
-            return  # Do NOT emit finished on error
+            return
         self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
@@ -64,8 +71,7 @@ class SpatialSmoothWorker(QThread):
 
         mask_files = get_image_files(self._input_dir)
         if not mask_files:
-            self.error.emit(f"No mask files found in {self._input_dir}")
-            return
+            raise _SmoothingAbort(f"No mask files found in {self._input_dir}")
 
         os.makedirs(self._output_dir, exist_ok=True)
         total = len(mask_files)
@@ -86,7 +92,7 @@ class SpatialSmoothWorker(QThread):
                 dt=self._dt,
                 kappa=self._kappa,
                 option=self._option,
-                post_gaussian_sigma=self._post_gaussian_sigma,
+                gaussian_sigma=self._gaussian_sigma,
             )
 
             out_name = os.path.basename(mask_path)
@@ -113,6 +119,7 @@ class TemporalSmoothWorker(QThread):
         sigma: float = 2.0,
         num_neighbors: int = 2,
         variance_threshold: Optional[float] = None,
+        temporal_sigma: Optional[float] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -121,6 +128,7 @@ class TemporalSmoothWorker(QThread):
         self._sigma = sigma
         self._num_neighbors = num_neighbors
         self._variance_threshold = variance_threshold
+        self._temporal_sigma = temporal_sigma
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -130,10 +138,13 @@ class TemporalSmoothWorker(QThread):
     def run(self):
         try:
             self._run_smoothing()
+        except _SmoothingAbort as e:
+            self.error.emit(str(e))
+            return
         except Exception as e:
             logger.exception("Temporal smoothing failed")
             self.error.emit(str(e))
-            return  # Do NOT emit finished on error
+            return
         self.finished.emit(self._output_dir)
 
     def _run_smoothing(self):
@@ -141,8 +152,7 @@ class TemporalSmoothWorker(QThread):
 
         mask_files = get_image_files(self._input_dir)
         if not mask_files:
-            self.error.emit(f"No mask files found in {self._input_dir}")
-            return
+            raise _SmoothingAbort(f"No mask files found in {self._input_dir}")
 
         os.makedirs(self._output_dir, exist_ok=True)
 
@@ -157,8 +167,7 @@ class TemporalSmoothWorker(QThread):
                 if frames:
                     mask = np.zeros_like(frames[0])
                 else:
-                    self.error.emit(f"First mask unreadable: {path}")
-                    return
+                    raise _SmoothingAbort(f"First mask unreadable: {path}")
             frames.append(mask)
 
         def on_progress(step_name, current, total):
@@ -169,6 +178,7 @@ class TemporalSmoothWorker(QThread):
             variance_threshold=self._variance_threshold,
             num_neighbors=self._num_neighbors,
             sigma=self._sigma,
+            temporal_sigma=self._temporal_sigma,
             progress_callback=on_progress,
         )
 
@@ -211,7 +221,7 @@ class SmoothingController(QObject):
         dt: float = 0.1,
         kappa: float = 30.0,
         option: int = 1,
-        post_gaussian_sigma: float = 0.0,
+        gaussian_sigma: float = 2.0,
     ) -> None:
         if self.is_running:
             logger.warning("Smoothing already in progress")
@@ -224,7 +234,7 @@ class SmoothingController(QObject):
             dt=dt,
             kappa=kappa,
             option=option,
-            post_gaussian_sigma=post_gaussian_sigma,
+            gaussian_sigma=gaussian_sigma,
         )
         self._connect_worker_spatial(worker)
         self._worker = worker
@@ -238,6 +248,7 @@ class SmoothingController(QObject):
         sigma: float = 2.0,
         num_neighbors: int = 2,
         variance_threshold: Optional[float] = None,
+        temporal_sigma: Optional[float] = None,
     ) -> None:
         if self.is_running:
             logger.warning("Smoothing already in progress")
@@ -249,6 +260,7 @@ class SmoothingController(QObject):
             sigma=sigma,
             num_neighbors=num_neighbors,
             variance_threshold=variance_threshold,
+            temporal_sigma=temporal_sigma,
         )
         self._connect_worker_temporal(worker)
         self._worker = worker
@@ -286,11 +298,17 @@ class SmoothingController(QObject):
         worker.error.connect(self._on_error)
 
     def _on_finished(self, output_dir: str) -> None:
+        worker = self._worker
         self._worker = None
+        if worker is not None:
+            worker.wait()  # ensure thread fully stops before GC
         self.smoothing_finished.emit(output_dir)
         logger.info(f"Smoothing finished: {output_dir}")
 
     def _on_error(self, error_msg: str) -> None:
         """Clean up worker reference on error."""
+        worker = self._worker
         self._worker = None
+        if worker is not None:
+            worker.wait()
         self.smoothing_error.emit(error_msg)

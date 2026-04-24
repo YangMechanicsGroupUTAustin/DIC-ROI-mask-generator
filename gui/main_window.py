@@ -16,32 +16,42 @@ controllers, and AppState for full application functionality.
 
 import logging
 import os
-from typing import Optional
+import time
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
+import numpy as np
+from PyQt6.QtCore import QRect, QSettings, Qt, QTimer
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QMainWindow,
+    QMenu,
+    QMenuBar,
     QMessageBox,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from controllers.correction_controller import CorrectionController
+from controllers.manual_edit_controller import ManualEditController
 from gui.icons import get_icon
 from gui.panels.canvas_area import CanvasArea
+from gui.panels.filmstrip import Filmstrip
 from gui.panels.frame_navigator import FrameNavigator
 from gui.panels.sidebar import Sidebar
 from gui.panels.status_bar import StatusBar
 from gui.panels.toolbar import Toolbar
-from gui.theme import Colors
+from gui.theme import Colors, Fonts
 
 logger = logging.getLogger("sam2studio.main_window")
 
 
 class MainWindow(QMainWindow):
-    """Main application window for SAM2 Studio.
+    """Main application window for DIC Mask Generator.
 
     When instantiated without controllers (e.g. in tests), builds the
     layout only. When controllers are provided, wires all signals.
@@ -53,6 +63,8 @@ class MainWindow(QMainWindow):
         annotation_controller=None,
         processing_controller=None,
         smoothing_controller=None,
+        shape_controller=None,
+        preview_controller=None,
     ):
         super().__init__()
 
@@ -60,17 +72,44 @@ class MainWindow(QMainWindow):
         self._annotation = annotation_controller
         self._processing = processing_controller
         self._smoothing = smoothing_controller
+        self._shape_ctrl = shape_controller
+        self._preview_ctrl = preview_controller
 
-        # Cached downsampled first frame for real-time preprocessing preview
-        # BGR format, max 1024px on longest side
-        self._cached_preview_frame: Optional['np.ndarray'] = None
+        # Range-based correction state machine (Phase B). Owned by MainWindow
+        # so we can always ask "is this point allowed?" before forwarding a
+        # click to the annotation controller.
+        self._corr_ctrl = CorrectionController(self)
+        # Flag so that the next `processing_finished` knows it closed a
+        # correction run (not a full Start Processing run) and should go
+        # back to REVIEWING / clean up correction state.
+        self._correction_run_in_progress: bool = False
 
-        # Original display image dimensions (h, w) for coordinate consistency.
-        # Preprocessing preview is upscaled to these dimensions so annotation
-        # points stay in the same coordinate space as the original image.
-        self._original_display_size: Optional[tuple[int, int]] = None
+        # Previous tool before entering shape draw mode (to restore on cancel)
+        self._tool_before_shape: str = "select"
 
-        self.setWindowTitle("SAM2 Studio")
+        # Active mask directory for display (relative to output_dir)
+        # Changes when smoothing outputs to a separate directory
+        self._active_mask_subdir: str = "masks"
+
+        # Track whether spatial smoothing was run in this session
+        self._spatial_ran_this_session: bool = False
+
+        # ── Step 0 manual edit state ──
+        # Per-step completion (0=Manual Edit, 1=Spatial, 2=Temporal).
+        # Controls the chain rule: step N reads from whatever the last
+        # completed previous step wrote to.
+        self._step_done: dict[int, bool] = {0: False, 1: False, 2: False}
+        self._manual_edit = ManualEditController(self)
+        self._manual_is_eraser: bool = False
+        self._manual_brush_radius: int = 10
+        self._manual_overlay_timer = QTimer(self)
+        self._manual_overlay_timer.setSingleShot(True)
+        self._manual_overlay_timer.setInterval(33)  # ~30 fps overlay refresh
+        self._manual_overlay_timer.timeout.connect(
+            self._refresh_overlay_from_manual_edit
+        )
+
+        self.setWindowTitle("DIC Mask Generator")
         self.setMinimumSize(1200, 700)
 
         # Application icon
@@ -104,6 +143,9 @@ class MainWindow(QMainWindow):
         self._canvas_area = CanvasArea()
         right_layout.addWidget(self._canvas_area, 1)
 
+        self._filmstrip = Filmstrip()
+        right_layout.addWidget(self._filmstrip)
+
         self._frame_navigator = FrameNavigator()
         right_layout.addWidget(self._frame_navigator)
 
@@ -115,6 +157,9 @@ class MainWindow(QMainWindow):
         self._status_bar = StatusBar()
         root_layout.addWidget(self._status_bar)
 
+        # Menu bar
+        self._create_menu_bar()
+
         # Wire signals if controllers are provided
         if self._state is not None:
             self._connect_signals()
@@ -124,11 +169,15 @@ class MainWindow(QMainWindow):
         # Start maximized
         self.showMaximized()
 
+        # Restore last-used paths from QSettings
+        self._restore_settings()
+
     # --- Window event overrides ---
 
     def closeEvent(self, event) -> None:
-        """Warn user if processing is still running before closing."""
+        """Save settings and warn user if processing is still running."""
         try:
+            self._save_settings()
             if self._processing is not None and self._processing.is_running:
                 reply = QMessageBox.question(
                     self,
@@ -183,6 +232,470 @@ class MainWindow(QMainWindow):
         """
         return self._status_bar
 
+    # --- Menu Bar ---
+
+    def _create_menu_bar(self) -> None:
+        """Build the application menu bar."""
+        menubar = self.menuBar()
+        menubar.setStyleSheet(
+            f"QMenuBar {{ background: {Colors.BG_DARK}; "
+            f"color: {Colors.TEXT_SECONDARY}; "
+            f"font-size: 12px; padding: 2px 0; }}"
+            f"QMenuBar::item:selected {{ background: {Colors.BG_LIGHT}; }}"
+            f"QMenu {{ background: {Colors.BG_MEDIUM}; "
+            f"color: {Colors.TEXT_PRIMARY}; border: 1px solid {Colors.BORDER}; }}"
+            f"QMenu::item:selected {{ background: {Colors.PRIMARY}; }}"
+        )
+
+        # --- File menu ---
+        file_menu = menubar.addMenu("&File")
+
+        new_project = QAction("New Project", self)
+        new_project.setShortcut(QKeySequence("Ctrl+N"))
+        new_project.triggered.connect(self._new_project)
+        file_menu.addAction(new_project)
+
+        file_menu.addSeparator()
+
+        open_input = QAction("Open Input Directory...", self)
+        open_input.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        open_input.triggered.connect(self._menu_open_input)
+        file_menu.addAction(open_input)
+
+        open_output = QAction("Set Output Directory...", self)
+        open_output.triggered.connect(self._menu_open_output)
+        file_menu.addAction(open_output)
+
+        file_menu.addSeparator()
+
+        self._recent_menu = QMenu("Recent Projects", self)
+        file_menu.addMenu(self._recent_menu)
+        self._recent_menu.aboutToShow.connect(self._build_recent_menu)
+
+        file_menu.addSeparator()
+
+        save_project = QAction("Save Project...", self)
+        save_project.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_project.triggered.connect(self._on_save_project)
+        file_menu.addAction(save_project)
+
+        load_project = QAction("Open Project...", self)
+        load_project.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        load_project.triggered.connect(self._on_load_project)
+        file_menu.addAction(load_project)
+
+        file_menu.addSeparator()
+
+        save_config = QAction("Save Config...", self)
+        save_config.setShortcut(QKeySequence("Ctrl+S"))
+        save_config.triggered.connect(self._on_save_config)
+        file_menu.addAction(save_config)
+
+        load_config = QAction("Load Config...", self)
+        load_config.setShortcut(QKeySequence("Ctrl+O"))
+        load_config.triggered.connect(self._on_load_config)
+        file_menu.addAction(load_config)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # --- Edit menu ---
+        edit_menu = menubar.addMenu("&Edit")
+
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        undo_action.triggered.connect(self._shortcut_undo)
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcut(QKeySequence("Ctrl+Y"))
+        redo_action.triggered.connect(self._shortcut_redo)
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
+
+        clear_action = QAction("Clear All Points", self)
+        clear_action.triggered.connect(
+            lambda: self._annotation.clear_points() if self._annotation else None
+        )
+        edit_menu.addAction(clear_action)
+
+        edit_menu.addSeparator()
+
+        goto_frame = QAction("Go to Frame...", self)
+        goto_frame.setShortcut(QKeySequence("Ctrl+G"))
+        goto_frame.triggered.connect(self._show_jump_to_frame)
+        edit_menu.addAction(goto_frame)
+
+        # --- View menu ---
+        view_menu = menubar.addMenu("&View")
+
+        reset_zoom = QAction("Reset Zoom", self)
+        reset_zoom.setShortcut(QKeySequence("Ctrl+0"))
+        reset_zoom.triggered.connect(self._canvas_area.reset_zoom)
+        view_menu.addAction(reset_zoom)
+
+        fit_window = QAction("Fit to Window", self)
+        fit_window.setShortcut(QKeySequence("Ctrl+1"))
+        fit_window.triggered.connect(self._canvas_area.fit_in_view)
+        view_menu.addAction(fit_window)
+
+        view_menu.addSeparator()
+
+        overlay_settings = QAction("Overlay Settings...", self)
+        overlay_settings.triggered.connect(self._show_overlay_settings)
+        view_menu.addAction(overlay_settings)
+
+        # --- Tools menu ---
+        tools_menu = menubar.addMenu("&Tools")
+
+        export_contour_png = QAction("Export Contours as PNG...", self)
+        export_contour_png.triggered.connect(
+            lambda: self._export_contours("PNG")
+        )
+        tools_menu.addAction(export_contour_png)
+
+        export_contour_svg = QAction("Export Contours as SVG...", self)
+        export_contour_svg.triggered.connect(
+            lambda: self._export_contours("SVG")
+        )
+        tools_menu.addAction(export_contour_svg)
+
+        tools_menu.addSeparator()
+
+        batch_action = QAction("Batch Processing...", self)
+        batch_action.triggered.connect(self._show_batch_dialog)
+        tools_menu.addAction(batch_action)
+
+        # --- Help menu ---
+        help_menu = menubar.addMenu("&Help")
+
+        shortcuts_action = QAction("Keyboard Shortcuts", self)
+        shortcuts_action.setShortcut(QKeySequence("F1"))
+        shortcuts_action.triggered.connect(self._show_shortcuts_dialog)
+        help_menu.addAction(shortcuts_action)
+
+        help_menu.addSeparator()
+
+        about_action = QAction("About DIC Mask Generator", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
+    def _new_project(self) -> None:
+        """Reset all state for a fresh project."""
+        if self._state is None:
+            return
+        # Confirm if there are existing annotations
+        if self._state.points:
+            reply = QMessageBox.question(
+                self, "New Project",
+                "Current annotations will be lost. Continue?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Stop any running processing
+        if self._processing and self._processing.is_running:
+            self._processing.stop_processing()
+
+        # Reset ALL state including paths (bypass setters to avoid
+        # triggering image discovery or error messages on empty strings)
+        self._state.set_points([], [])
+        self._state.set_image_files([])
+        self._state._input_dir = ""
+        self._state._output_dir = ""
+        self._state.clear_marked_frames()
+        self._state.clear_display_images()
+        self._active_mask_subdir = "masks"
+        self._state.set_state(self._state.State.INIT)
+
+        # Clear UI
+        self._sidebar.set_input_path("")
+        self._sidebar.set_output_path("")
+        self._sidebar.switch_to_processing()
+        self._canvas_area.clear_all()
+        self._filmstrip.set_image_files([])
+        if self._shape_ctrl:
+            self._shape_ctrl.clear()
+            self._sidebar.clear_shape_entries()
+        if self._annotation:
+            self._annotation._undo_stack.clear()
+            self._annotation._redo_stack.clear()
+            self._annotation._emit_state()
+
+        self._status_bar.set_status("New project — select input directory", "ready")
+
+    def _menu_open_input(self) -> None:
+        """Open input directory via file dialog."""
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Input Directory",
+        )
+        if path:
+            self._sidebar.set_input_path(path)
+            self._on_input_dir_changed(path)
+
+    def _menu_open_output(self) -> None:
+        """Set output directory via file dialog."""
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory",
+        )
+        if path:
+            self._sidebar.set_output_path(path)
+            if self._state:
+                self._state.set_output_dir(path)
+
+    # --- Settings persistence (QSettings) ---
+
+    _MAX_RECENT = 8
+    _SETTINGS_ORG = "SAM2Studio"
+    _SETTINGS_APP = "SAM2Studio"
+
+    def _get_settings(self) -> QSettings:
+        return QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+
+    def _save_settings(self) -> None:
+        """Persist input/output paths and recent projects."""
+        settings = self._get_settings()
+        if self._state:
+            if self._state.input_dir:
+                settings.setValue("paths/last_input", self._state.input_dir)
+            if self._state.output_dir:
+                settings.setValue("paths/last_output", self._state.output_dir)
+            # Add to recent projects list
+            if self._state.input_dir:
+                recent = settings.value("paths/recent_projects", [], list)
+                entry = self._state.input_dir
+                if entry in recent:
+                    recent.remove(entry)
+                recent.insert(0, entry)
+                settings.setValue(
+                    "paths/recent_projects", recent[: self._MAX_RECENT],
+                )
+
+    def _restore_settings(self) -> None:
+        """Restore path display from previous session.
+
+        Only populates the sidebar path fields for convenience —
+        does NOT load images or change application state.  The user
+        must explicitly click Browse or press Enter to load.
+        """
+        if self._state is None:
+            return
+        settings = self._get_settings()
+        last_input = settings.value("paths/last_input", "")
+        last_output = settings.value("paths/last_output", "")
+        if last_input and os.path.isdir(last_input):
+            self._sidebar.set_input_path(last_input, emit_signal=False)
+        if last_output:
+            self._sidebar.set_output_path(last_output, emit_signal=False)
+
+    def _build_recent_menu(self) -> None:
+        """Rebuild the 'Recent Projects' submenu."""
+        if not hasattr(self, "_recent_menu"):
+            return
+        self._recent_menu.clear()
+        settings = self._get_settings()
+        recent = settings.value("paths/recent_projects", [], list)
+        if not recent:
+            no_items = QAction("(no recent projects)", self)
+            no_items.setEnabled(False)
+            self._recent_menu.addAction(no_items)
+            return
+        for path in recent:
+            action = QAction(path, self)
+            action.triggered.connect(
+                lambda checked, p=path: self._open_recent_project(p),
+            )
+            self._recent_menu.addAction(action)
+        self._recent_menu.addSeparator()
+        clear = QAction("Clear Recent", self)
+        clear.triggered.connect(self._clear_recent_projects)
+        self._recent_menu.addAction(clear)
+
+    def _open_recent_project(self, path: str) -> None:
+        """Open a recent project by path."""
+        if not os.path.isdir(path):
+            QMessageBox.warning(
+                self, "Not Found",
+                f"Directory no longer exists:\n{path}",
+            )
+            return
+        self._sidebar.set_input_path(path)
+        self._on_input_dir_changed(path)
+
+    def _clear_recent_projects(self) -> None:
+        """Clear the recent projects list."""
+        settings = self._get_settings()
+        settings.setValue("paths/recent_projects", [])
+        self._build_recent_menu()
+
+    def _show_shortcuts_dialog(self) -> None:
+        """Show keyboard shortcuts reference dialog."""
+        shortcuts = [
+            ("Tool Selection", [
+                ("V", "Select tool"),
+                ("D", "Draw tool"),
+                ("E", "Erase tool"),
+                ("Space", "Toggle foreground / background"),
+            ]),
+            ("Editing", [
+                ("Ctrl+Z", "Undo"),
+                ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
+                ("Ctrl+Click", "Toggle point selection"),
+                ("Delete", "Delete selected points"),
+            ]),
+            ("Navigation", [
+                ("Left / Right Arrow", "Previous / Next frame"),
+                ("Home / End", "First / Last frame"),
+                ("Ctrl+G", "Jump to frame"),
+                ("M", "Toggle bookmark on current frame"),
+            ]),
+            ("File", [
+                ("Ctrl+Shift+S", "Save project"),
+                ("Ctrl+Shift+P", "Open project"),
+                ("Ctrl+S", "Save annotation config"),
+                ("Ctrl+O", "Load annotation config"),
+                ("Ctrl+Shift+O", "Open input directory"),
+                ("Ctrl+Q", "Quit"),
+            ]),
+            ("Processing", [
+                ("Ctrl+Enter", "Start processing"),
+                ("Escape", "Stop / Cancel"),
+            ]),
+            ("View", [
+                ("Ctrl+0", "Reset zoom"),
+                ("Ctrl+1", "Fit to window"),
+                ("Scroll Wheel", "Zoom in / out"),
+                ("Middle-click drag", "Pan"),
+            ]),
+        ]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.setMinimumSize(420, 500)
+        dialog.setStyleSheet(
+            f"QDialog {{ background: {Colors.BG_MEDIUM}; "
+            f"color: {Colors.TEXT_PRIMARY}; }}"
+        )
+
+        layout = QVBoxLayout(dialog)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+
+        for section_name, keys in shortcuts:
+            header = QLabel(f"<b>{section_name}</b>")
+            header.setStyleSheet(
+                f"color: {Colors.PRIMARY}; font-size: 14px; "
+                f"margin-top: 12px; background: transparent;"
+            )
+            content_layout.addWidget(header)
+            for key, desc in keys:
+                row = QLabel(
+                    f"<span style='color: {Colors.TEXT_PRIMARY}; "
+                    f"font-family: monospace; background: {Colors.BG_DARK}; "
+                    f"padding: 2px 6px; border-radius: 3px;'>"
+                    f"{key}</span>  {desc}"
+                )
+                row.setStyleSheet(
+                    f"color: {Colors.TEXT_SECONDARY}; font-size: 13px; "
+                    f"padding: 3px 0; background: transparent;"
+                )
+                content_layout.addWidget(row)
+
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        btn_box.accepted.connect(dialog.accept)
+        layout.addWidget(btn_box)
+
+        dialog.exec()
+
+    def _show_about_dialog(self) -> None:
+        """Show about dialog."""
+        QMessageBox.about(
+            self,
+            "About DIC Mask Generator",
+            "<h3>DIC Mask Generator v2.0</h3>"
+            "<p>Mask Generator for DIC & ROI Recognition</p>"
+            "<p>Built with PyQt6 + Meta SAM2</p>"
+            "<p>Powered by Segment Anything Model 2</p>",
+        )
+
+    def _show_overlay_settings(self) -> None:
+        """Show overlay transparency and color settings dialog."""
+        from PyQt6.QtWidgets import QColorDialog, QSlider, QSpinBox
+
+        if self._state is None:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Overlay Settings")
+        dlg.setMinimumWidth(320)
+        layout = QVBoxLayout(dlg)
+
+        # Opacity slider
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Opacity:"))
+        opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        opacity_slider.setRange(0, 100)
+        opacity_slider.setValue(int(self._state.overlay_alpha * 100))
+        opacity_label = QLabel(f"{int(self._state.overlay_alpha * 100)}%")
+        opacity_slider.valueChanged.connect(
+            lambda v: opacity_label.setText(f"{v}%"),
+        )
+        opacity_row.addWidget(opacity_slider)
+        opacity_row.addWidget(opacity_label)
+        layout.addLayout(opacity_row)
+
+        # Color picker button
+        current_color = self._state.overlay_color
+        color_btn = QPushButton(
+            f"Color: ({current_color[0]}, {current_color[1]}, {current_color[2]})"
+        )
+        chosen_color = list(current_color)
+
+        from PyQt6.QtWidgets import QPushButton as _QPB
+
+        def pick_color():
+            from PyQt6.QtGui import QColor
+            c = QColorDialog.getColor(
+                QColor(*current_color), self, "Overlay Color",
+            )
+            if c.isValid():
+                chosen_color[:] = [c.red(), c.green(), c.blue()]
+                color_btn.setText(
+                    f"Color: ({c.red()}, {c.green()}, {c.blue()})",
+                )
+
+        color_btn.clicked.connect(pick_color)
+        layout.addWidget(color_btn)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+        )
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._state.set_overlay_alpha(opacity_slider.value() / 100.0)
+            self._state.set_overlay_color(tuple(chosen_color))
+            # Refresh current frame to apply new settings
+            self._load_current_frame()
+
     # --- Signal Wiring ---
 
     def _connect_signals(self) -> None:
@@ -198,19 +711,95 @@ class MainWindow(QMainWindow):
         self._sidebar.device_changed.connect(self._on_device_changed)
         self._sidebar.model_changed.connect(state.set_model_name)
         self._sidebar.format_changed.connect(state.set_intermediate_format)
+        self._sidebar.mask_format_changed.connect(
+            state.set_mask_output_format,
+        )
         self._sidebar.threshold_changed.connect(state.set_threshold)
+
+        # --- Early-Frame Refinement: bidirectional Sidebar <-> AppState ---
+        # Sidebar -> AppState (user-driven)
+        self._sidebar.refine_enabled_changed.connect(
+            state.set_refine_enabled
+        )
+        self._sidebar.refine_anchor_changed.connect(
+            state.set_refine_anchor_frame
+        )
+        self._sidebar.refine_overwrite_changed.connect(
+            state.set_refine_overwrite_count
+        )
+        # AppState -> Sidebar (programmatic, e.g. after image_files load).
+        # Sidebar setters block their widgets' signals, so this won't loop.
+        state.refine_enabled_changed.connect(self._sidebar.set_refine_enabled)
+        state.refine_anchor_changed.connect(self._on_refine_anchor_changed)
+        state.refine_overwrite_changed.connect(
+            self._sidebar.set_refine_overwrite_count
+        )
 
         self._sidebar.preprocessing_preview_requested.connect(
             self._on_preview_preprocessing
         )
+        self._sidebar.save_preprocessed_requested.connect(
+            self._on_save_preprocessed
+        )
+        self._sidebar.shape_draw_requested.connect(
+            self._on_shape_draw_requested
+        )
+        self._sidebar.shape_removed.connect(self._on_shape_removed)
+        self._sidebar.shape_selected.connect(
+            self._canvas_area.highlight_shape
+        )
+
+        # Shape controller: refresh preview whenever shapes change
+        if self._shape_ctrl is not None:
+            self._shape_ctrl.shapes_changed.connect(
+                self._refresh_preview_with_shapes
+            )
 
         if smoothing is not None:
             self._sidebar.spatial_smooth_requested.connect(
                 self._on_spatial_smooth
             )
+            self._sidebar.spatial_preview_requested.connect(
+                self._on_spatial_preview
+            )
             self._sidebar.temporal_smooth_requested.connect(
                 self._on_temporal_smooth
             )
+            self._sidebar.refresh_stats_requested.connect(
+                self._on_refresh_stats
+            )
+            self._sidebar.mask_view_changed.connect(
+                self._on_mask_view_changed
+            )
+            self._sidebar.panel_switched.connect(
+                self._on_sidebar_panel_switched
+            )
+
+        # --- Step 0 manual edit wiring ---
+        self._sidebar.pp_step_advanced.connect(self._on_pp_step_advanced)
+        self._sidebar.manual_tool_changed.connect(
+            self._on_manual_tool_changed
+        )
+        self._sidebar.manual_brush_size_changed.connect(
+            self._on_manual_brush_size_changed
+        )
+        self._sidebar.manual_undo_requested.connect(self._manual_edit.undo)
+        self._sidebar.manual_redo_requested.connect(self._manual_edit.redo)
+
+        self._canvas_area.brush_stroke_begun.connect(
+            self._on_manual_brush_begin
+        )
+        self._canvas_area.brush_stroke_continued.connect(
+            self._on_manual_brush_continue
+        )
+        self._canvas_area.brush_stroke_ended.connect(
+            self._on_manual_brush_end
+        )
+
+        self._manual_edit.mask_modified.connect(self._on_manual_mask_modified)
+        self._manual_edit.undo_state_changed.connect(
+            self._sidebar.set_manual_undo_state
+        )
 
         # --- Toolbar signals ---
         self._toolbar.tool_changed.connect(self._canvas_area.set_active_tool)
@@ -243,18 +832,40 @@ class MainWindow(QMainWindow):
         self._toolbar.apply_correction_requested.connect(
             self._on_apply_correction
         )
+        # Toolbar spin boxes → controller (user-driven range edits)
+        self._toolbar.correction_range_changed.connect(
+            self._corr_ctrl.set_range
+        )
+        # Controller → toolbar (echo back so set_total_frames / clamping
+        # are reflected in the UI). Uses the signal-suppression guard
+        # inside set_correction_range to avoid a feedback loop.
+        self._corr_ctrl.range_changed.connect(
+            self._toolbar.set_correction_range
+        )
         self._toolbar.force_reprocess_changed.connect(
             state.set_force_reprocess
         )
 
         # --- Canvas area signals ---
         if annotation is not None:
-            self._canvas_area.point_added.connect(annotation.add_point)
+            # Intercept point-add so CorrectionController can reject clicks
+            # that fall on non-anchor frames during CORRECTION mode.
+            self._canvas_area.point_added.connect(
+                self._on_canvas_point_added
+            )
             self._canvas_area.point_moved.connect(annotation.move_point)
             self._canvas_area.point_removed.connect(annotation.remove_point)
 
+        self._canvas_area.delete_selected_requested.connect(
+            self._on_delete_selected_points
+        )
+
         self._canvas_area.load_images_requested.connect(
             self._on_load_images_requested
+        )
+        self._canvas_area.shape_confirmed.connect(self._on_shape_confirmed)
+        self._canvas_area.shape_drawing_cancelled.connect(
+            self._on_shape_drawing_cancelled
         )
 
         # --- Frame navigator signals ---
@@ -265,6 +876,18 @@ class MainWindow(QMainWindow):
         self._frame_navigator.end_frame_changed.connect(
             self._on_end_frame_changed
         )
+        self._frame_navigator.mark_frame_toggled.connect(
+            self._on_toggle_mark_frame
+        )
+
+        # --- Filmstrip signals ---
+        self._filmstrip.frame_selected.connect(self._on_frame_changed)
+        self._frame_navigator.jump_to_prev_mark.connect(
+            self._on_jump_to_prev_mark
+        )
+        self._frame_navigator.jump_to_next_mark.connect(
+            self._on_jump_to_next_mark
+        )
 
         # --- AppState signals ---
         state.state_changed.connect(self._update_ui_for_state)
@@ -274,12 +897,21 @@ class MainWindow(QMainWindow):
         state.current_frame_changed.connect(
             self._frame_navigator.set_current_frame
         )
+        state.current_frame_changed.connect(
+            self._filmstrip.set_current_frame
+        )
         state.frame_range_changed.connect(self._on_frame_range_changed)
         state.device_changed.connect(
             lambda dev: self._status_bar.set_device_info(dev)
         )
         state.vram_updated.connect(self._status_bar.set_vram_usage)
         state.status_message.connect(self._status_bar.set_status)
+        state.marked_frames_changed.connect(
+            self._frame_navigator.update_mark_state
+        )
+        state.marked_frames_changed.connect(
+            self._filmstrip.update_mark_indicators
+        )
 
         # --- Processing controller signals ---
         if processing is not None:
@@ -316,26 +948,14 @@ class MainWindow(QMainWindow):
             self._toggle_point_mode
         )
 
-        # Undo / Redo
-        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(
-            self._shortcut_undo
-        )
-        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(
-            self._shortcut_redo
-        )
+        # Ctrl+Shift+Z as alternative redo (Ctrl+Z and Ctrl+Y are
+        # already registered via menu bar QActions — duplicating them
+        # here would create ambiguous shortcuts and neither would fire).
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self).activated.connect(
             self._shortcut_redo
         )
 
-        # Save / Load config
-        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(
-            self._on_save_config
-        )
-        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(
-            self._on_load_config
-        )
-
-        # Frame navigation
+        # Frame navigation (no menu equivalents)
         QShortcut(QKeySequence("Left"), self).activated.connect(
             self._frame_navigator._prev_frame
         )
@@ -349,7 +969,7 @@ class MainWindow(QMainWindow):
             self._go_to_last_frame
         )
 
-        # Processing
+        # Processing (no menu equivalents)
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(
             self._on_start_processing
         )
@@ -357,10 +977,23 @@ class MainWindow(QMainWindow):
             self._shortcut_escape
         )
 
+        # Mark frame
+        QShortcut(QKeySequence("M"), self).activated.connect(
+            lambda: self._on_toggle_mark_frame(self._state.current_frame)
+        )
+
     def _activate_tool(self, tool: str) -> None:
-        """Activate a tool via shortcut: update toolbar and canvas."""
+        """Activate a tool via shortcut: update toolbar and canvas.
+
+        Also transfers keyboard focus to the canvas so the very first
+        click registers immediately (avoids the "first click lost to
+        focus transfer" issue common with QGraphicsView).
+        """
         self._toolbar.set_tool(tool)
         self._canvas_area.set_active_tool(tool)
+        # Ensure the interactive canvas view has focus so mouse events
+        # are processed without needing a focus-acquiring click first.
+        self._canvas_area._original._view.setFocus()
 
     def _toggle_point_mode(self) -> None:
         """Toggle between foreground and background point mode."""
@@ -397,8 +1030,30 @@ class MainWindow(QMainWindow):
             nav.set_current_frame(nav._total_frames)
             nav.frame_changed.emit(nav._total_frames)
 
+    def _show_jump_to_frame(self) -> None:
+        """Show a dialog to jump to a specific frame (Ctrl+G)."""
+        if self._state is None or not self._state.image_files:
+            return
+
+        from PyQt6.QtWidgets import QInputDialog
+
+        total = len(self._state.image_files)
+        frame, ok = QInputDialog.getInt(
+            self, "Go to Frame",
+            f"Frame number (1 - {total}):",
+            self._state.current_frame, 1, total,
+        )
+        if ok:
+            self._state.set_current_frame(frame)
+            self._frame_navigator.set_current_frame(frame)
+
     def _shortcut_escape(self) -> None:
-        """Handle Escape: stop processing or cancel correction."""
+        """Handle Escape: cancel shape drawing, stop processing, or cancel correction."""
+        # Shape drawing takes priority
+        if self._canvas_area.is_shape_drawing:
+            self._canvas_area.exit_shape_draw_mode()
+            return
+
         from controllers.app_state import AppState
 
         if self._state is None:
@@ -410,6 +1065,12 @@ class MainWindow(QMainWindow):
         elif current == AppState.State.POST_PROCESSING:
             self._on_stop_processing()
         elif current == AppState.State.CORRECTION:
+            # Clear the anchor + any pending correction points before
+            # leaving the state — otherwise the next "Add Correction"
+            # would inherit stale points.
+            if self._annotation is not None:
+                self._annotation.clear_points()
+            self._corr_ctrl.on_exit_correction()
             self._state.set_state(AppState.State.REVIEWING)
 
     # --- State-dependent UI enablement ---
@@ -461,6 +1122,8 @@ class MainWindow(QMainWindow):
         # Correction buttons
         self._toolbar._add_correction_btn.setEnabled(is_reviewing)
         self._toolbar._apply_correction_btn.setEnabled(is_correction)
+        # Range spin boxes: editable only while composing a correction
+        self._toolbar.set_correction_range_enabled(is_correction)
         self._toolbar._force_reprocess.setEnabled(not is_busy)
 
         # Frame navigator
@@ -500,7 +1163,6 @@ class MainWindow(QMainWindow):
             self._state.set_input_dir(path)
             if self._state.image_files:
                 self._load_current_frame()
-                self._cache_preview_frame()
                 self._state.set_state(
                     self._state.State.ANNOTATING
                 )
@@ -556,13 +1218,38 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Capture current preprocessing config from sidebar
-        preprocessing_config = self._sidebar.get_preprocessing_config()
+        # Check for existing masks in output directory
+        skip_existing = False
+        output_dir = self._state.output_dir
+        mask_dir = os.path.join(output_dir, "masks")
+        if os.path.isdir(mask_dir):
+            existing = [
+                f for f in os.listdir(mask_dir)
+                if f.lower().endswith((".tiff", ".tif", ".png"))
+            ]
+            if existing:
+                action = self._ask_overwrite_action(len(existing), mask_dir)
+                if action == "cancel":
+                    return
+                if action == "new_subfolder":
+                    from datetime import datetime
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    new_dir = os.path.join(output_dir, f"run_{ts}")
+                    os.makedirs(new_dir, exist_ok=True)
+                    self._state.set_output_dir(new_dir)
+                    self._sidebar.set_output_path(new_dir)
+                elif action == "resume":
+                    skip_existing = True
+                # action == "overwrite" → proceed with existing dir
+
+        # Capture current preprocessing config from sidebar (with shapes)
+        preprocessing_config = self._get_config_with_shapes()
         self._state.set_preprocessing_config(preprocessing_config)
 
         self._status_bar.reset_timer()
+        self._processing_start_time = time.monotonic()
         self._state.set_state(self._state.State.PROCESSING)
-        self._processing.start_processing()
+        self._processing.start_processing(skip_existing=skip_existing)
 
     def _on_stop_processing(self) -> None:
         """Stop the current processing operation."""
@@ -574,31 +1261,148 @@ class MainWindow(QMainWindow):
 
     def _on_add_correction(self) -> None:
         """Enter correction state for mid-sequence adjustments."""
-        if self._state is not None:
-            self._state.set_state(self._state.State.CORRECTION)
+        if self._state is None:
+            return
+        # Block if SAM2 model is not loaded
+        if self._processing is not None:
+            mg = self._processing._mask_generator
+            if not mg.is_initialized:
+                self._show_error(
+                    "Cannot Enter Correction",
+                    "SAM2 model is not loaded.\n"
+                    "Run full processing first to initialize the model.",
+                )
+                return
+
+        # Start with a clean slate: drop any leftover annotation points so
+        # the user doesn't accidentally feed them into a correction run.
+        if self._annotation is not None:
+            self._annotation.clear_points()
+
+        # Seed the correction controller with the current frame (1-based)
+        # and total frames. The default range is [current, current].
+        total = max(1, len(self._state.image_files))
+        self._corr_ctrl.on_enter_correction(
+            current_frame=self._state.current_frame,
+            total_frames=total,
+        )
+
+        self._state.set_state(self._state.State.CORRECTION)
+
+    def _on_canvas_point_added(self, x: float, y: float) -> None:
+        """Forward canvas clicks to the annotation controller, with
+        correction-mode gating.
+
+        When the user is in CORRECTION mode, the first dropped point locks
+        the anchor frame. Subsequent points on other frames are rejected
+        via a toast on the status bar (we don't silently drop them).
+        """
+        if self._annotation is None:
+            return
+
+        from controllers.app_state import AppState
+        if self._state.state == AppState.State.CORRECTION:
+            if not self._corr_ctrl.try_add_point(self._state.current_frame):
+                self._status_bar.set_status(
+                    f"Points can only be added on anchor frame "
+                    f"{self._corr_ctrl.anchor_frame}. "
+                    f"Navigate there or clear the anchor.",
+                    "error",
+                )
+                return
+
+        self._annotation.add_point(x, y)
 
     def _on_apply_correction(self) -> None:
-        """Apply correction from the current frame with current points."""
+        """Apply correction over the selected range."""
         if self._processing is None:
             return
 
-        if not self._state.points:
+        if not self._corr_ctrl.can_apply(len(self._state.points)):
             self._show_error(
                 "Cannot Apply Correction",
-                "No annotation points. Add correction points first.",
+                "Need at least one correction point on a valid anchor frame "
+                "that sits inside the selected range.",
             )
             return
 
-        # current_frame is 1-based, correction needs 0-based
-        frame_idx = self._state.current_frame - 1
+        anchor_1b = self._corr_ctrl.anchor_frame
+        start_1b = self._corr_ctrl.range_start
+        end_1b = self._corr_ctrl.range_end
 
+        # UI is 1-based (frame navigator, range spins); SAM2 is 0-based.
+        anchor_0b = int(anchor_1b) - 1
+        start_0b = int(start_1b) - 1
+        end_0b = int(end_1b) - 1
+
+        self._correction_run_in_progress = True
         self._status_bar.reset_timer()
+        self._processing_start_time = time.monotonic()
         self._state.set_state(self._state.State.PROCESSING)
         self._processing.start_correction(
-            frame_idx=frame_idx,
+            anchor_frame_idx=anchor_0b,
+            range_start=start_0b,
+            range_end=end_0b,
             points=list(self._state.points),
             labels=list(self._state.labels),
         )
+
+    def _on_save_project(self) -> None:
+        """Save full project state to a .s2proj file."""
+        if self._state is None:
+            return
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Project",
+            os.path.join(self._state.output_dir or "", "project.s2proj"),
+            "DIC Mask Generator Project (*.s2proj)",
+        )
+        if not filepath:
+            return
+
+        from core.project import save_project
+        try:
+            save_project(filepath, self._state)
+            self._state.status_message.emit(
+                f"Project saved to {filepath}", "ready"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
+    def _on_load_project(self) -> None:
+        """Load a project from a .s2proj file."""
+        if self._state is None:
+            return
+
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", "",
+            "DIC Mask Generator Project (*.s2proj)",
+        )
+        if not filepath:
+            return
+
+        from core.project import load_project, apply_project_to_state
+        try:
+            project = load_project(filepath)
+            # Reset state first
+            self._new_project()
+            apply_project_to_state(project, self._state)
+
+            # Update sidebar with restored paths
+            if self._state.input_dir:
+                self._sidebar.set_input_path(self._state.input_dir)
+            if self._state.output_dir:
+                self._sidebar.set_output_path(self._state.output_dir)
+
+            # Load the first frame
+            if self._state.image_files:
+                self._load_current_frame()
+
+            self._state.status_message.emit(
+                f"Project loaded from {filepath}", "ready"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", str(e))
 
     def _on_save_config(self) -> None:
         """Save annotation config to file via QFileDialog."""
@@ -613,7 +1417,10 @@ class MainWindow(QMainWindow):
         )
         if filepath:
             try:
-                self._annotation.save_config(filepath)
+                shapes = (
+                    self._shape_ctrl.overlays if self._shape_ctrl else None
+                )
+                self._annotation.save_config(filepath, shapes=shapes)
                 self._status_bar.set_status(
                     f"Config saved: {os.path.basename(filepath)}", "ready"
                 )
@@ -638,7 +1445,17 @@ class MainWindow(QMainWindow):
         )
         if filepath:
             try:
-                self._annotation.load_config(filepath)
+                saved_shapes = self._annotation.load_config(filepath)
+                # Restore shapes into ShapeController
+                if self._shape_ctrl and saved_shapes:
+                    self._shape_ctrl.clear()
+                    for s in saved_shapes:
+                        self._shape_ctrl.add_shape(
+                            s["mode"], s["shape_type"], s["points"],
+                        )
+                    self._sidebar.rebuild_shape_list(
+                        self._shape_ctrl.overlays,
+                    )
                 self._status_bar.set_status(
                     f"Config loaded: {os.path.basename(filepath)}", "ready"
                 )
@@ -664,9 +1481,22 @@ class MainWindow(QMainWindow):
     # --- Frame navigator handlers ---
 
     def _on_frame_changed(self, frame: int) -> None:
-        """Handle frame navigation: update state and load the frame image."""
+        """Handle frame navigation: update state and load the frame image.
+
+        If Step 0 (Manual Edit) is the active post-processing step, flush
+        the current frame's in-memory edits to disk before switching so
+        the user never loses work on navigation, and re-seed the
+        controller with the new frame afterwards.
+        """
+        manual_active = self._is_manual_edit_active()
+        if manual_active:
+            self._manual_edit.save_frame_if_dirty()
         self._state.set_current_frame(frame)
         self._load_current_frame()
+        if manual_active:
+            self._load_manual_edit_for_current_frame()
+        # Update bookmark visual for new frame
+        self._frame_navigator.update_mark_state(self._state.marked_frames)
 
     def _on_start_frame_changed(self, start: int) -> None:
         """Handle start frame spinbox change."""
@@ -677,6 +1507,40 @@ class MainWindow(QMainWindow):
         """Handle end frame spinbox change."""
         start, _ = self._frame_navigator.get_frame_range()
         self._state.set_frame_range(start, end)
+
+    def _on_delete_selected_points(self) -> None:
+        """Delete all selected annotation points at once."""
+        if self._annotation is None:
+            return
+        selected = self._canvas_area.get_selected_point_indices()
+        if not selected:
+            return
+        # Remove in reverse order to preserve indices
+        for idx in sorted(selected, reverse=True):
+            self._annotation.remove_point(idx)
+        self._canvas_area.clear_point_selection()
+
+    def _on_toggle_mark_frame(self, frame: int) -> None:
+        """Toggle bookmark on the given frame."""
+        self._state.toggle_marked_frame(frame)
+
+    def _on_jump_to_prev_mark(self) -> None:
+        """Jump to the previous marked frame."""
+        prev_f = self._state.prev_marked_frame(self._state.current_frame)
+        if prev_f is not None:
+            self._state.set_current_frame(prev_f)
+            self._load_current_frame()
+        else:
+            self._state.status_message.emit("No previous marked frame", "warning")
+
+    def _on_jump_to_next_mark(self) -> None:
+        """Jump to the next marked frame."""
+        next_f = self._state.next_marked_frame(self._state.current_frame)
+        if next_f is not None:
+            self._state.set_current_frame(next_f)
+            self._load_current_frame()
+        else:
+            self._state.status_message.emit("No next marked frame", "warning")
 
     # --- AppState signal handlers ---
 
@@ -692,8 +1556,43 @@ class MainWindow(QMainWindow):
             self._canvas_area.set_overlay_image(self._state.current_overlay)
 
     def _on_image_files_changed(self, files: list) -> None:
-        """Update frame navigator when image list changes."""
-        self._frame_navigator.set_total_frames(len(files))
+        """Update frame navigator, filmstrip, and correction UI bounds."""
+        total = len(files)
+        self._frame_navigator.set_total_frames(total)
+        self._filmstrip.set_image_files(files)
+        # Update the correction state machine + toolbar spin-box maxes
+        self._corr_ctrl.set_total_frames(max(1, total))
+        self._toolbar.set_correction_frame_count(max(1, total))
+        # --- Refine spinbox bounds follow the new sequence length ---
+        # AppState has already recomputed default anchor/K via
+        # _reset_refine_defaults(); we just need to lift the spinbox max
+        # caps so the user can dial in any value within range.
+        if total > 0:
+            self._sidebar.set_refine_max_anchor(total)
+            # K is constrained by current anchor, not total.
+            self._sidebar.set_refine_max_overwrite(
+                self._state.refine_anchor_frame
+            )
+            # Mirror the freshly recomputed defaults into the spinboxes
+            # (state already emitted the signals during set_image_files,
+            # but if we connected them after AppState was constructed the
+            # signals fired before any listener was attached -- safest is
+            # to push the current value through explicitly here too).
+            self._sidebar.set_refine_anchor_frame(
+                self._state.refine_anchor_frame
+            )
+            self._sidebar.set_refine_overwrite_count(
+                self._state.refine_overwrite_count
+            )
+
+    def _on_refine_anchor_changed(self, anchor: int) -> None:
+        """Mirror AppState anchor changes into the sidebar UI.
+
+        Also lifts the overwrite-count spinbox max to match the new anchor
+        (since K must satisfy K <= anchor).
+        """
+        self._sidebar.set_refine_anchor_frame(anchor)
+        self._sidebar.set_refine_max_overwrite(anchor)
 
     def _on_frame_range_changed(self, start: int, end: int) -> None:
         """Sync frame range spinboxes when state changes."""
@@ -710,8 +1609,28 @@ class MainWindow(QMainWindow):
     def _on_processing_progress(
         self, current: int, total: int, message: str
     ) -> None:
-        """Update status bar with processing progress."""
+        """Update status bar with processing progress and ETA."""
         self._status_bar.set_status(message, "processing")
+
+        # Calculate ETA based on elapsed time and progress
+        eta_text = ""
+        start_time = getattr(self, "_processing_start_time", None)
+        if start_time is not None and current > 0 and total > 0:
+            elapsed = time.monotonic() - start_time
+            rate = elapsed / current
+            remaining = rate * (total - current)
+            if remaining < 60:
+                eta_text = f"~{int(remaining)}s remaining"
+            elif remaining < 3600:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                eta_text = f"~{mins}m {secs}s remaining"
+            else:
+                hrs = int(remaining // 3600)
+                mins = int((remaining % 3600) // 60)
+                eta_text = f"~{hrs}h {mins}m remaining"
+
+        self._status_bar.set_processing_progress(current, total, eta_text)
 
     def _on_frame_processed(self, frame_idx: int, mask) -> None:
         """Update all three panels during propagation.
@@ -757,7 +1676,11 @@ class MainWindow(QMainWindow):
                     display_original, (mw, mh),
                     interpolation=cv2.INTER_LINEAR,
                 )
-            overlay = create_overlay(display_original, mask)
+            overlay = create_overlay(
+                display_original, mask,
+                alpha=self._state.overlay_alpha,
+                color=self._state.overlay_color,
+            )
             self._state.set_display_images(
                 original=display_original, mask=mask, overlay=overlay,
             )
@@ -766,104 +1689,188 @@ class MainWindow(QMainWindow):
 
     def _on_processing_finished(self) -> None:
         """Handle processing completion."""
+        was_correction = self._correction_run_in_progress
+        self._correction_run_in_progress = False
+
         self._state.set_state(self._state.State.REVIEWING)
+        self._active_mask_subdir = "masks"  # Fresh results in masks/
         self._status_bar.set_status("Processing complete", "ready")
+        self._status_bar.hide_processing_progress()
+
+        if was_correction:
+            # Correction run finished cleanly → clear points and reset the
+            # correction state machine so the next "Add Correction" starts
+            # from a clean slate.
+            if self._annotation is not None:
+                self._annotation.clear_points()
+            self._corr_ctrl.on_exit_correction()
+            # Just reload the edited frame; skip the post-processing prompt
+            # since the user is still iterating on segmentation quality.
+            self._load_current_frame()
+            return
+
         # Reload current frame to show final results
         self._load_current_frame()
+        # Auto-export overlays if enabled
+        self._auto_export_overlays()
+        # Save processing summary
+        self._save_processing_summary()
+        # Offer cleanup of intermediate files
+        self._offer_cleanup()
+        # Prompt user to enter post-processing mode
+        self._prompt_postprocessing()
+
+    def _prompt_postprocessing(self) -> None:
+        """Ask user if they want to switch to the post-processing panel."""
+        reply = QMessageBox.question(
+            self,
+            "Processing Complete",
+            "Segmentation complete. Would you like to enter\n"
+            "post-processing mode for mask smoothing?",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._sidebar.switch_to_postprocessing()
 
     def _on_processing_error(self, error_msg: str) -> None:
         """Handle processing error."""
+        was_correction = self._correction_run_in_progress
+        self._correction_run_in_progress = False
         was_processing = (
             self._state.state == self._state.State.PROCESSING
         )
-        if was_processing and self._state.image_files:
+        if was_correction and self._state.image_files:
+            # Correction run errored — keep existing masks, drop back into
+            # REVIEWING and clear the correction state.
+            self._state.set_state(self._state.State.REVIEWING)
+            self._corr_ctrl.on_exit_correction()
+        elif was_processing and self._state.image_files:
             self._state.set_state(self._state.State.ANNOTATING)
         elif was_processing:
             self._state.set_state(self._state.State.INIT)
+        self._status_bar.hide_processing_progress()
         self._show_error("Processing Error", error_msg)
 
     # --- Preprocessing preview handlers ---
 
-    def _cache_preview_frame(self) -> None:
-        """Cache a downsampled BGR copy of the first frame for preview.
-
-        Uses load_image_as_rgb (with PIL fallback) to handle TIFF, 16-bit,
-        and other special formats that raw cv2.imread may not read.
-        """
-        self._cached_preview_frame = None
-        if self._state is None or not self._state.image_files:
-            return
-
-        try:
-            import cv2
-            from core.image_processing import load_image_as_rgb
-
-            first_path = self._state.image_files[0]
-            img_rgb = load_image_as_rgb(first_path)
-            if img_rgb is None:
-                logger.warning(f"Failed to load first frame for preview: {first_path}")
-                return
-
-            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-
-            # Downsample to max 1024px for fast preview
-            h, w = img_bgr.shape[:2]
-            max_dim = 1024
-            if max(h, w) > max_dim:
-                scale = max_dim / max(h, w)
-                img_bgr = cv2.resize(
-                    img_bgr,
-                    (int(w * scale), int(h * scale)),
-                    interpolation=cv2.INTER_AREA,
-                )
-
-            self._cached_preview_frame = img_bgr
-            logger.debug(f"Cached preview frame: {img_bgr.shape}")
-        except Exception as e:
-            logger.warning(f"Failed to cache preview frame: {e}")
-
     def _on_preview_preprocessing(self, config) -> None:
-        """Real-time preview: apply preprocessing to cached first frame.
+        """Delegate preprocessing preview to PreviewController."""
+        if self._preview_ctrl is not None:
+            config = self._preview_ctrl.get_config_with_shapes(config)
+            if config.is_identity():
+                self._load_current_frame()
+                return
+            self._preview_ctrl.apply_preview(config)
 
-        The preview is computed on a downsampled (1024px) copy for speed,
-        then upscaled to match the original image dimensions.  This keeps
-        the scene rect and annotation-point coordinate system consistent
-        with the full-resolution original.
-        """
+    # --- Save Preprocessed handler ---
+
+    def _on_save_preprocessed(self, config) -> None:
+        """Start standalone preprocessing save workflow."""
+        if self._processing is None:
+            return
+
+        if self._shape_ctrl is not None:
+            config = self._shape_ctrl.inject_shapes(config)
+
         if config.is_identity():
-            # No preprocessing — reload the crisp original frame
-            self._load_current_frame()
+            self._show_error(
+                "No Preprocessing",
+                "No preprocessing operations are enabled.\n"
+                "Adjust preprocessing settings before saving.",
+            )
             return
 
-        # Lazy init: populate cache if images were loaded before this code existed
-        if self._cached_preview_frame is None:
-            self._cache_preview_frame()
-        if self._cached_preview_frame is None:
+        if not self._state.image_files:
+            self._show_error(
+                "Cannot Save",
+                "No images loaded. Select an input directory first.",
+            )
             return
 
-        from core.preprocessing import apply_pipeline
-        import cv2
+        if not self._state.output_dir:
+            self._show_error(
+                "Cannot Save",
+                "No output directory selected. Set one in the sidebar.",
+            )
+            return
 
-        processed = apply_pipeline(self._cached_preview_frame, config)
-        preview_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+        self._status_bar.reset_timer()
+        self._state.set_state(self._state.State.POST_PROCESSING)
+        self._processing.start_save_preprocessed(config)
 
-        # Upscale to original resolution so the scene rect stays unchanged
-        # and annotation points remain in the correct coordinate space.
-        if self._original_display_size is not None:
-            orig_h, orig_w = self._original_display_size
-            ph, pw = preview_rgb.shape[:2]
-            if (ph, pw) != (orig_h, orig_w):
-                preview_rgb = cv2.resize(
-                    preview_rgb, (orig_w, orig_h),
-                    interpolation=cv2.INTER_LINEAR,
-                )
+    # --- Shape drawing handlers ---
 
-        self._state.set_display_images(original=preview_rgb)
+    def _on_shape_draw_requested(self, mode: str, shape_type: str) -> None:
+        """Enter shape drawing mode on canvas when requested from sidebar."""
+        # Remember current tool to restore after drawing completes/cancels
+        tool_names = {0: "select", 1: "draw", 2: "erase"}
+        checked_id = self._toolbar._tool_group.checkedId()
+        self._tool_before_shape = tool_names.get(checked_id, "select")
+        self._canvas_area.enter_shape_draw_mode(mode, shape_type)
+
+    def _on_shape_confirmed(
+        self, mode: str, shape_type: str, points: tuple,
+    ) -> None:
+        """Handle a completed shape from the canvas."""
+        if self._shape_ctrl is None:
+            return
+
+        index = self._shape_ctrl.add_shape(mode, shape_type, points)
+
+        # Update sidebar shape list
+        self._sidebar.add_shape_entry(mode, shape_type)
+
+        # Add visual overlay on canvas
+        self._canvas_area.add_confirmed_shape(mode, shape_type, points, index)
+
+        # Restore previous tool
+        self._activate_tool(self._tool_before_shape)
+
+    def _on_shape_removed(self, index: int) -> None:
+        """Handle shape removal from sidebar."""
+        if self._shape_ctrl is None:
+            return
+
+        if not self._shape_ctrl.remove_shape(index):
+            return
+
+        # Rebuild canvas overlays (indices shifted)
+        self._canvas_area.clear_confirmed_shapes()
+        for i, shape in enumerate(self._shape_ctrl.overlays):
+            self._canvas_area.add_confirmed_shape(
+                shape.mode, shape.shape_type, shape.points, i,
+            )
+
+        # Rebuild sidebar list
+        self._sidebar.rebuild_shape_list(self._shape_ctrl.overlays)
+
+    def _on_shape_drawing_cancelled(self) -> None:
+        """Restore previous tool state when shape drawing is cancelled."""
+        self._activate_tool(self._tool_before_shape)
+
+    def _get_config_with_shapes(self, config=None):
+        """Build preprocessing config with current shape overlays included."""
+        if config is None:
+            config = self._sidebar.get_preprocessing_config()
+        if self._shape_ctrl is not None:
+            config = self._shape_ctrl.inject_shapes(config)
+        return config
+
+    def _refresh_preview_with_shapes(self) -> None:
+        """Trigger preprocessing preview refresh with current shapes."""
+        config = self._get_config_with_shapes()
+        self._on_preview_preprocessing(config)
 
     # --- Smoothing handlers ---
 
     def _on_spatial_smooth(self, params: dict) -> None:
-        """Start spatial smoothing with parameters from the sidebar."""
+        """Start spatial smoothing with the chain-rule input directory.
+
+        Input directory is derived from step state:
+        - Step 0 done  → `manual_edited/`
+        - Otherwise    → `masks/`
+        """
         if self._smoothing is None or self._state is None:
             return
 
@@ -875,30 +1882,66 @@ class MainWindow(QMainWindow):
             )
             return
 
-        masks_dir = os.path.join(output_dir, "masks")
-        if not os.path.isdir(masks_dir):
+        input_subdir = self._step_input_subdir(1)
+        input_dir = os.path.join(output_dir, input_subdir)
+        if not os.path.isdir(input_dir):
             self._show_error(
                 "Cannot Smooth",
-                f"Masks directory not found: {masks_dir}\n"
+                f"Input directory not found: {input_dir}\n"
                 "Run processing first.",
             )
             return
 
-        smooth_output = os.path.join(output_dir, "mask_spatial_smoothing")
+        if params.get("replace_originals"):
+            smooth_output = os.path.join(output_dir, "masks")
+        else:
+            smooth_output = os.path.join(output_dir, "mask_spatial_smoothing")
 
+        self._spatial_ran_this_session = True
         self._status_bar.reset_timer()
+        self._smoothing_start_time = time.monotonic()
         self._state.set_state(self._state.State.POST_PROCESSING)
         self._smoothing.start_spatial(
-            input_dir=masks_dir,
+            input_dir=input_dir,
             output_dir=smooth_output,
             num_iterations=params.get("iterations", 50),
             dt=params.get("dt", 0.1),
             kappa=params.get("kappa", 30.0),
             option=params.get("option", 1),
+            gaussian_sigma=params.get("gaussian_sigma", 2.0),
         )
 
+    def _on_spatial_preview(self, params: dict) -> None:
+        """Open the interactive spatial smoothing preview dialog."""
+        if self._state is None or not self._state.output_dir:
+            return
+
+        masks_dir = os.path.join(self._state.output_dir, "masks")
+        if not os.path.isdir(masks_dir):
+            self._show_error("Cannot Preview", "No masks directory found.")
+            return
+
+        from gui.dialogs.spatial_preview_dialog import SpatialPreviewDialog
+
+        frame_idx = max(0, self._state.current_frame - 1)
+        preset_name = self._sidebar._spatial_strength.value()
+
+        dlg = SpatialPreviewDialog(
+            masks_dir=masks_dir,
+            initial_frame=frame_idx,
+            initial_preset=preset_name,
+            parent=self,
+        )
+        dlg.exec()
+
     def _on_temporal_smooth(self, params: dict) -> None:
-        """Start temporal smoothing with parameters from the sidebar."""
+        """Start temporal smoothing with the chain-rule input directory.
+
+        Input directory is derived from step state (see
+        ``_step_input_subdir``): the most recent previously-completed
+        step's output. The chain is deterministic — the user cannot
+        override the input via the mask-view dropdown.
+        """
         if self._smoothing is None or self._state is None:
             return
 
@@ -910,49 +1953,412 @@ class MainWindow(QMainWindow):
             )
             return
 
-        masks_dir = os.path.join(output_dir, "masks")
-        if not os.path.isdir(masks_dir):
+        input_subdir = self._step_input_subdir(2)
+        input_dir = os.path.join(output_dir, input_subdir)
+        if not os.path.isdir(input_dir):
             self._show_error(
                 "Cannot Smooth",
-                f"Masks directory not found: {masks_dir}\n"
+                f"Input directory not found: {input_dir}\n"
                 "Run processing first.",
             )
             return
 
-        smooth_output = os.path.join(output_dir, "mask_temporal_smoothing")
+        if params.get("replace_originals"):
+            smooth_output = os.path.join(output_dir, "masks")
+        else:
+            smooth_output = os.path.join(output_dir, "mask_temporal_smoothing")
 
         self._status_bar.reset_timer()
+        self._smoothing_start_time = time.monotonic()
         self._state.set_state(self._state.State.POST_PROCESSING)
         self._smoothing.start_temporal(
-            input_dir=masks_dir,
+            input_dir=input_dir,
             output_dir=smooth_output,
             sigma=params.get("sigma", 2.0),
             num_neighbors=params.get("neighbors", 2),
             variance_threshold=params.get("variance_threshold"),
+            temporal_sigma=params.get("temporal_sigma", 0),
         )
 
     def _on_smoothing_progress(
         self, current: int, total: int, message: str
     ) -> None:
-        """Update status bar with smoothing progress."""
+        """Update status bar with smoothing progress and ETA."""
         self._status_bar.set_status(message, "processing")
 
+        # Calculate ETA based on elapsed time
+        eta_text = ""
+        start_time = getattr(self, "_smoothing_start_time", None)
+        if start_time is not None and current > 0 and total > 0:
+            elapsed = time.monotonic() - start_time
+            rate = elapsed / current
+            remaining = rate * (total - current)
+            if remaining < 60:
+                eta_text = f"~{int(remaining)}s remaining"
+            elif remaining < 3600:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                eta_text = f"~{mins}m {secs}s remaining"
+            else:
+                hrs = int(remaining // 3600)
+                mins = int((remaining % 3600) // 60)
+                eta_text = f"~{hrs}h {mins}m remaining"
+
+        self._status_bar.set_processing_progress(current, total, eta_text)
+
     def _on_smoothing_finished(self, output_dir: str) -> None:
-        """Handle smoothing completion."""
+        """Handle smoothing completion.
+
+        Switches the active mask display directory to the smoothed
+        output so the user can immediately see the results.
+        Also updates the Mask View selector with available options.
+        """
         self._state.set_state(self._state.State.REVIEWING)
+
+        # Determine which mask subdir to display
+        if self._state.output_dir and output_dir.startswith(
+            self._state.output_dir
+        ):
+            # Extract relative subdir (e.g. "mask_spatial_smoothing")
+            self._active_mask_subdir = os.path.relpath(
+                output_dir, self._state.output_dir,
+            )
+        else:
+            # Replace-in-place mode → still "masks"
+            self._active_mask_subdir = "masks"
+
+        # Update the mask view selector in sidebar
+        view_label = self._mask_subdir_to_label(self._active_mask_subdir)
+        self._sidebar.add_mask_view_option(view_label)
+        self._sidebar.set_mask_view(view_label)
+
+        # Update temporal source indicator
+        self._update_temporal_source_label()
+
+        dir_name = os.path.basename(output_dir)
         self._status_bar.set_status(
-            f"Smoothing complete: {os.path.basename(output_dir)}", "ready"
+            f"Smoothing complete — viewing: {dir_name}", "ready",
         )
+        self._status_bar.hide_processing_progress()
+        # Reload current frame to show smoothed masks
+        self._load_current_frame()
 
     def _on_smoothing_error(self, error_msg: str) -> None:
         """Handle smoothing error."""
         self._state.set_state(self._state.State.REVIEWING)
+        self._status_bar.hide_processing_progress()
         self._show_error("Smoothing Error", error_msg)
+
+    # --- Step 0 manual edit: chain rule & handlers ---
+
+    # Fixed output-subdir per step (0 = Manual Edit, 1 = Spatial, 2 = Temporal)
+    _STEP_OUTPUT_SUBDIR = {
+        0: "manual_edited",
+        1: "mask_spatial_smoothing",
+        2: "mask_temporal_smoothing",
+    }
+
+    def _step_output_subdir(self, step: int) -> str:
+        """Return the fixed output subdirectory for a post-processing step."""
+        return self._STEP_OUTPUT_SUBDIR.get(step, "masks")
+
+    def _step_input_subdir(self, step: int) -> str:
+        """Return the input subdir for `step` following the chain rule.
+
+        Each step reads from the output of the most-recent previously
+        completed step. If no earlier step completed, it falls back to
+        the raw ``masks/`` directory.
+        """
+        for prev in range(step - 1, -1, -1):
+            if self._step_done.get(prev, False):
+                return self._step_output_subdir(prev)
+        return "masks"
+
+    def _is_manual_edit_active(self) -> bool:
+        """True when Step 0 is the currently active post-processing step."""
+        return (
+            self._sidebar is not None
+            and getattr(self._sidebar, "_pp_current_step", -1) == 0
+            and self._state is not None
+            and bool(self._state.output_dir)
+        )
+
+    def _manual_edit_dirs(self) -> tuple[str, str] | None:
+        """Return (source_dir, edit_dir) used by the manual edit controller.
+
+        Source is the chain-input subdir for Step 0 (always "masks/" for
+        now, but kept as a helper for future extension). Edit dir is the
+        fixed ``manual_edited/`` subdir.
+        """
+        if self._state is None or not self._state.output_dir:
+            return None
+        out = self._state.output_dir
+        source = os.path.join(out, self._step_input_subdir(0))
+        edit = os.path.join(out, self._step_output_subdir(0))
+        return source, edit
+
+    def _load_manual_edit_for_current_frame(self) -> None:
+        """Load the current frame into ``ManualEditController``."""
+        if not self._is_manual_edit_active() or self._state is None:
+            return
+        dirs = self._manual_edit_dirs()
+        if dirs is None:
+            return
+        source_dir, edit_dir = dirs
+        if not os.path.isdir(source_dir):
+            return
+        frame_idx = max(0, self._state.current_frame - 1)
+        self._manual_edit.load_frame(frame_idx, source_dir, edit_dir)
+
+    def _on_pp_step_advanced(self, step: int) -> None:
+        """Handle sidebar step Done/Skip. Flush edits and apply chain rule."""
+        if step == 0:
+            # Flush any pending edit for the current frame to disk.
+            self._manual_edit.save_frame_if_dirty()
+            # Leave mask edit mode on the canvas so normal viewing resumes.
+            self._canvas_area.set_mask_edit_mode(False)
+
+            # Consider Step 0 "done" only if something was actually
+            # written to the manual_edited/ directory. Skipping with no
+            # edits keeps the chain reading from masks/.
+            edit_dir = None
+            if self._state is not None and self._state.output_dir:
+                edit_dir = os.path.join(
+                    self._state.output_dir, self._step_output_subdir(0),
+                )
+            has_edits = bool(
+                edit_dir
+                and os.path.isdir(edit_dir)
+                and os.listdir(edit_dir)
+            )
+            self._step_done[0] = has_edits
+
+            if has_edits:
+                label = self._mask_subdir_to_label("manual_edited")
+                self._sidebar.add_mask_view_option(label)
+        elif step == 1:
+            self._step_done[1] = True
+        elif step == 2:
+            self._step_done[2] = True
+
+    def _on_manual_tool_changed(self, tool: str) -> None:
+        """Switch between brush and eraser on the canvas."""
+        self._manual_is_eraser = tool == "eraser"
+        self._canvas_area.set_mask_brush_tool(tool)
+
+    def _on_manual_brush_size_changed(self, radius: int) -> None:
+        """Update brush radius on the canvas panel and local state."""
+        self._manual_brush_radius = max(1, int(radius))
+        self._canvas_area.set_mask_brush_radius(self._manual_brush_radius)
+
+    def _on_manual_brush_begin(self, x: float, y: float) -> None:
+        """Forward brush-begin from canvas to controller."""
+        if not self._is_manual_edit_active():
+            return
+        self._manual_edit.begin_stroke(
+            x, y, self._manual_brush_radius, self._manual_is_eraser,
+        )
+
+    def _on_manual_brush_continue(self, x: float, y: float) -> None:
+        """Forward brush-continue from canvas to controller."""
+        if not self._is_manual_edit_active():
+            return
+        self._manual_edit.continue_stroke(x, y)
+
+    def _on_manual_brush_end(self) -> None:
+        """Forward brush-end from canvas to controller."""
+        if not self._is_manual_edit_active():
+            return
+        self._manual_edit.end_stroke()
+
+    def _on_manual_mask_modified(self, rect: QRect) -> None:
+        """Controller reported a dirty region — refresh mask + schedule overlay.
+
+        The mask panel gets an immediate update for responsive drawing
+        feedback; the more expensive overlay is rebuilt on a throttled
+        ~30 fps timer.
+        """
+        mask = self._manual_edit.current_mask
+        if mask is not None:
+            self._canvas_area.set_mask_image(mask)
+        if not self._manual_overlay_timer.isActive():
+            self._manual_overlay_timer.start()
+
+    def _refresh_overlay_from_manual_edit(self) -> None:
+        """Rebuild the overlay panel from the controller's in-memory mask."""
+        if self._state is None or self._state.current_original is None:
+            return
+        mask = self._manual_edit.current_mask
+        if mask is None:
+            return
+        from core.image_processing import create_overlay
+
+        overlay = create_overlay(
+            self._state.current_original,
+            mask,
+            alpha=self._state.overlay_alpha,
+            color=self._state.overlay_color,
+        )
+        self._canvas_area.set_overlay_image(overlay)
+
+    def _on_mask_view_changed(self, subdir: str) -> None:
+        """Switch display to a different mask directory (display-only).
+
+        The chain rule is driven by ``_step_done``, not by this dropdown,
+        so changing the view never affects which directory the next
+        step will read from.
+        """
+        self._active_mask_subdir = subdir
+        self._load_current_frame()
+
+    @staticmethod
+    def _mask_subdir_to_label(subdir: str) -> str:
+        """Convert mask subdir name to a human-readable label."""
+        mapping = {
+            "masks": "Original (masks/)",
+            "manual_edited": "Manually Edited",
+            "mask_spatial_smoothing": "Spatial Smoothed",
+            "mask_temporal_smoothing": "Temporal Smoothed",
+        }
+        return mapping.get(subdir, subdir)
+
+    def _update_temporal_source_label(self) -> None:
+        """Update the temporal smoothing input source label in sidebar."""
+        if self._state is None or not self._state.output_dir:
+            self._sidebar.update_temporal_source_label("masks/", is_chained=False)
+            return
+        spatial_dir = os.path.join(
+            self._state.output_dir, "mask_spatial_smoothing",
+        )
+        if os.path.isdir(spatial_dir) and os.listdir(spatial_dir):
+            self._sidebar.update_temporal_source_label(
+                "mask_spatial_smoothing/ (chained)", is_chained=True,
+            )
+        else:
+            self._sidebar.update_temporal_source_label(
+                "masks/", is_chained=False,
+            )
+
+    def _on_sidebar_panel_switched(self, panel: str) -> None:
+        """Refresh dynamic labels when user switches sidebar tabs.
+
+        Also enters/exits Step 0 manual edit mode on the canvas: the
+        mask panel becomes brush-editable only while the user is on
+        the Post-Processing tab AND Step 0 is the active step.
+        """
+        if panel == "postprocessing":
+            self._update_temporal_source_label()
+            if self._is_manual_edit_active():
+                self._canvas_area.set_mask_edit_mode(
+                    True,
+                    "eraser" if self._manual_is_eraser else "brush",
+                )
+                self._canvas_area.set_mask_brush_radius(
+                    self._manual_brush_radius
+                )
+                self._load_manual_edit_for_current_frame()
+        else:
+            # Leaving the post-processing panel — flush any in-memory
+            # edit and leave mask edit mode.
+            self._manual_edit.save_frame_if_dirty()
+            self._canvas_area.set_mask_edit_mode(False)
+
+    def _on_refresh_stats(self) -> None:
+        """Compute and display mask statistics."""
+        if self._state is None or not self._state.output_dir:
+            self._sidebar.update_mask_statistics(
+                "Area: no output directory", "Consistency: —", "Anomalies: —",
+            )
+            return
+
+        import cv2
+        from core.image_processing import imread_safe
+
+        mask_dir = os.path.join(
+            self._state.output_dir, self._active_mask_subdir,
+        )
+        if not os.path.isdir(mask_dir):
+            self._sidebar.update_mask_statistics(
+                "Area: no masks found", "Consistency: —", "Anomalies: —",
+            )
+            return
+
+        # Collect mask files sorted by name
+        mask_files = sorted([
+            f for f in os.listdir(mask_dir)
+            if f.lower().endswith((".tiff", ".tif", ".png"))
+        ])
+        if not mask_files:
+            self._sidebar.update_mask_statistics(
+                "Area: no masks found", "Consistency: —", "Anomalies: —",
+            )
+            return
+
+        # Calculate per-frame area percentage
+        areas = []
+        for mf in mask_files:
+            mask = imread_safe(
+                os.path.join(mask_dir, mf), cv2.IMREAD_GRAYSCALE,
+            )
+            if mask is None:
+                areas.append(0.0)
+                continue
+            total_pixels = mask.shape[0] * mask.shape[1]
+            mask_pixels = int((mask > 127).sum())
+            areas.append(100.0 * mask_pixels / total_pixels if total_pixels > 0 else 0.0)
+
+        # Area summary
+        avg_area = sum(areas) / len(areas) if areas else 0.0
+        min_area = min(areas) if areas else 0.0
+        max_area = max(areas) if areas else 0.0
+        area_text = (
+            f"Area: avg {avg_area:.1f}% | "
+            f"min {min_area:.1f}% | max {max_area:.1f}% "
+            f"({len(mask_files)} frames)"
+        )
+
+        # Frame-to-frame consistency (mean absolute change)
+        changes = []
+        for i in range(1, len(areas)):
+            changes.append(abs(areas[i] - areas[i - 1]))
+        avg_change = sum(changes) / len(changes) if changes else 0.0
+        consistency_text = f"Consistency: avg Δ {avg_change:.2f}%/frame"
+
+        # Anomaly detection (frames with >3x average change)
+        anomaly_threshold = max(avg_change * 3.0, 1.0)
+        anomalies = [
+            i + 1 for i, c in enumerate(changes) if c > anomaly_threshold
+        ]
+        if anomalies:
+            if len(anomalies) > 5:
+                shown = ", ".join(str(a) for a in anomalies[:5])
+                anomaly_text = (
+                    f"Anomalies: {len(anomalies)} frames "
+                    f"(Δ>{anomaly_threshold:.1f}%): {shown}..."
+                )
+            else:
+                shown = ", ".join(str(a) for a in anomalies)
+                anomaly_text = (
+                    f"Anomalies: {len(anomalies)} frames "
+                    f"(Δ>{anomaly_threshold:.1f}%): {shown}"
+                )
+        else:
+            anomaly_text = "Anomalies: none detected"
+
+        self._sidebar.update_mask_statistics(
+            area_text, consistency_text, anomaly_text,
+        )
 
     # --- Helper methods ---
 
     def _load_current_frame(self) -> None:
-        """Load the current frame image from disk and update display."""
+        """Load the current frame image from disk and update display.
+
+        Also updates the preview cache for real-time preprocessing slider
+        feedback.  If preprocessing is active, delegates to
+        ``_on_preview_preprocessing`` so that frame-switch and slider-change
+        share the exact same rendering path.
+        """
         if self._state is None:
             return
 
@@ -967,8 +2373,17 @@ class MainWindow(QMainWindow):
             image_path = files[frame - 1]  # current_frame is 1-based
             image = load_image_as_rgb(image_path)
             if image is not None:
-                self._original_display_size = (image.shape[0], image.shape[1])
-                self._state.set_display_images(original=image)
+                # Update preview cache for this frame
+                if self._preview_ctrl is not None:
+                    self._preview_ctrl.cache_frame(image)
+
+                # Apply preprocessing through the same path as slider
+                # changes so the result is always consistent.
+                config = self._get_config_with_shapes()
+                if not config.is_identity():
+                    self._on_preview_preprocessing(config)
+                else:
+                    self._state.set_display_images(original=image)
 
                 # Also try to load existing mask and overlay
                 self._load_existing_mask_for_frame(frame - 1)
@@ -976,14 +2391,33 @@ class MainWindow(QMainWindow):
             logger.exception(f"Failed to load frame {frame}")
 
     def _load_existing_mask_for_frame(self, frame_idx: int) -> None:
-        """Try to load an existing mask for a frame and create overlay."""
+        """Try to load an existing mask for a frame and create overlay.
+
+        Searches the active mask directory (defaults to ``masks/``,
+        switches to smoothed output dir after smoothing).
+        Supports both ``.tiff`` and ``.png`` extensions.
+        Clears the mask/overlay panels if no mask is found.
+        """
         if self._state is None or not self._state.output_dir:
             return
 
-        mask_dir = os.path.join(self._state.output_dir, "masks")
-        mask_path = os.path.join(mask_dir, f"mask_{frame_idx:06d}.tiff")
+        mask_dir = os.path.join(
+            self._state.output_dir, self._active_mask_subdir,
+        )
 
-        if not os.path.exists(mask_path):
+        # Try both extensions — TIFF first, then PNG
+        mask_path = None
+        for ext in (".tiff", ".tif", ".png"):
+            candidate = os.path.join(mask_dir, f"mask_{frame_idx:06d}{ext}")
+            if os.path.exists(candidate):
+                mask_path = candidate
+                break
+
+        if mask_path is None:
+            # Clear stale mask/overlay so the display doesn't show
+            # leftover data from a previously viewed frame or directory.
+            self._canvas_area._mask.clear_image()
+            self._canvas_area._overlay.clear_image()
             return
 
         try:
@@ -993,11 +2427,311 @@ class MainWindow(QMainWindow):
             mask = imread_safe(mask_path, cv2.IMREAD_GRAYSCALE)
             if mask is not None and self._state.current_original is not None:
                 overlay = create_overlay(
-                    self._state.current_original, mask
+                    self._state.current_original, mask,
+                    alpha=self._state.overlay_alpha,
+                    color=self._state.overlay_color,
                 )
                 self._state.set_display_images(mask=mask, overlay=overlay)
+            else:
+                self._canvas_area._mask.clear_image()
+                self._canvas_area._overlay.clear_image()
         except Exception as e:
             logger.warning(f"Could not load mask for frame {frame_idx}: {e}")
+
+    def _auto_export_overlays(self) -> None:
+        """Export overlay images if the sidebar checkbox is enabled."""
+        if not self._sidebar.export_overlays_enabled:
+            return
+        if self._state is None or not self._state.output_dir:
+            return
+
+        import cv2
+        from core.image_processing import (
+            create_overlay, imread_safe, imwrite_safe,
+        )
+
+        mask_dir = os.path.join(self._state.output_dir, "masks")
+        overlay_dir = os.path.join(self._state.output_dir, "overlays")
+        if not os.path.isdir(mask_dir):
+            return
+        os.makedirs(overlay_dir, exist_ok=True)
+
+        exported = 0
+        for i, img_path in enumerate(self._state.image_files):
+            # Find corresponding mask (try tiff then png)
+            mask_path = None
+            for ext in (".tiff", ".png", ".tif"):
+                candidate = os.path.join(mask_dir, f"mask_{i:06d}{ext}")
+                if os.path.exists(candidate):
+                    mask_path = candidate
+                    break
+            if mask_path is None:
+                continue
+
+            original = imread_safe(img_path)
+            mask = imread_safe(mask_path, cv2.IMREAD_GRAYSCALE)
+            if original is None or mask is None:
+                continue
+
+            # Convert BGR to RGB if needed
+            if original.ndim == 3 and original.shape[2] == 3:
+                original_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
+            else:
+                original_rgb = original
+
+            overlay = create_overlay(original_rgb, mask)
+            overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
+            out_path = os.path.join(overlay_dir, f"overlay_{i:06d}.png")
+            imwrite_safe(out_path, overlay_bgr)
+            exported += 1
+
+        if exported > 0:
+            self._status_bar.set_status(
+                f"Exported {exported} overlay images", "ready",
+            )
+            logger.info(f"Auto-exported {exported} overlays to {overlay_dir}")
+
+    def _save_processing_summary(self) -> None:
+        """Save a processing summary JSON after processing completes."""
+        if self._state is None or not self._state.output_dir:
+            return
+
+        import json
+        from datetime import datetime
+
+        output_dir = self._state.output_dir
+        mask_dir = os.path.join(output_dir, "masks")
+        mask_count = 0
+        if os.path.isdir(mask_dir):
+            mask_count = len([
+                f for f in os.listdir(mask_dir)
+                if f.lower().endswith((".tiff", ".tif", ".png"))
+            ])
+
+        duration = 0.0
+        if hasattr(self, "_processing_start_time"):
+            duration = time.monotonic() - self._processing_start_time
+
+        summary = {
+            "timestamp": datetime.now().isoformat(),
+            "model": self._state.model_name,
+            "device": self._state.device,
+            "threshold": self._state.threshold,
+            "mask_output_format": self._state.mask_output_format,
+            "intermediate_format": self._state.intermediate_format,
+            "input_directory": self._state.input_dir,
+            "output_directory": output_dir,
+            "total_input_frames": len(self._state.image_files),
+            "masks_generated": mask_count,
+            "frame_range": [self._state.start_frame, self._state.end_frame],
+            "annotation_points": len(self._state.points),
+            "processing_duration_seconds": round(duration, 2),
+            "preprocessing": {
+                "enabled": not self._state.preprocessing_config.is_identity(),
+            },
+        }
+
+        summary_path = os.path.join(output_dir, "processing_summary.json")
+        try:
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, ensure_ascii=False)
+            logger.info(f"Processing summary saved to {summary_path}")
+        except OSError as e:
+            logger.warning(f"Failed to save processing summary: {e}")
+
+    def _show_batch_dialog(self) -> None:
+        """Show the batch multi-directory processing dialog."""
+        if self._state is None:
+            return
+
+        if not self._state.points:
+            QMessageBox.warning(
+                self, "No Annotations",
+                "Add annotation points before batch processing.",
+            )
+            return
+
+        from gui.dialogs.batch_dialog import BatchProcessingDialog
+
+        dialog = BatchProcessingDialog(
+            default_output=self._state.output_dir, parent=self,
+        )
+        dialog.batch_start.connect(self._start_batch_processing)
+        dialog.exec()
+
+    def _start_batch_processing(self, dirs: list[tuple[str, str]]) -> None:
+        """Process multiple directories sequentially.
+
+        Args:
+            dirs: List of (input_dir, output_dir) tuples.
+        """
+        if self._state is None or self._processing is None:
+            return
+
+        self._batch_queue = list(dirs)
+        self._batch_total = len(dirs)
+        self._batch_completed = 0
+        self._process_next_batch()
+
+    def _process_next_batch(self) -> None:
+        """Process the next directory in the batch queue."""
+        if not hasattr(self, "_batch_queue") or not self._batch_queue:
+            # All done
+            self._state.status_message.emit(
+                f"Batch complete: {self._batch_completed}/{self._batch_total} directories",
+                "ready",
+            )
+            return
+
+        input_dir, output_dir = self._batch_queue.pop(0)
+        self._batch_completed += 1
+
+        self._state.status_message.emit(
+            f"Batch {self._batch_completed}/{self._batch_total}: {os.path.basename(input_dir)}",
+            "processing",
+        )
+
+        # Set paths and trigger processing
+        self._state.set_input_dir(input_dir)
+        self._state.set_output_dir(output_dir)
+        self._sidebar.set_input_path(input_dir)
+        self._sidebar.set_output_path(output_dir)
+
+        # Disconnect/reconnect the batch chain
+        try:
+            self._processing.processing_finished.disconnect(
+                self._process_next_batch
+            )
+        except (TypeError, RuntimeError):
+            pass
+        self._processing.processing_finished.connect(
+            self._process_next_batch
+        )
+
+        # Start processing for this directory
+        self._processing.start_processing()
+
+    def _export_contours(self, fmt: str) -> None:
+        """Export mask contours as PNG or SVG files."""
+        if self._state is None or not self._state.output_dir:
+            QMessageBox.warning(
+                self, "No Output", "No output directory set."
+            )
+            return
+
+        mask_dir = os.path.join(self._state.output_dir, "masks")
+        if not os.path.isdir(mask_dir):
+            QMessageBox.warning(
+                self, "No Masks",
+                "No masks directory found. Run processing first.",
+            )
+            return
+
+        from core.contour_export import batch_export_contours
+
+        contour_dir = os.path.join(
+            self._state.output_dir, f"contours_{fmt.lower()}"
+        )
+        self._state.status_message.emit(
+            f"Exporting contours as {fmt}...", "processing"
+        )
+
+        def on_progress(cur, total, msg):
+            self._state.processing_progress.emit(cur, total, msg)
+
+        count = batch_export_contours(
+            mask_dir, contour_dir, fmt=fmt, thickness=2,
+            progress_callback=on_progress,
+        )
+        self._state.status_message.emit(
+            f"Exported {count} contour files to {contour_dir}", "ready"
+        )
+
+    def _offer_cleanup(self) -> None:
+        """Offer to clean up intermediate files after processing."""
+        if self._state is None or not self._state.output_dir:
+            return
+
+        import shutil
+
+        output_dir = self._state.output_dir
+        intermediate_dirs = []
+        for name in ("converted_jpeg", "converted_png",
+                      "preprocessed_jpeg", "preprocessed_png",
+                      "preprocessed"):
+            d = os.path.join(output_dir, name)
+            if os.path.isdir(d):
+                intermediate_dirs.append(d)
+
+        if not intermediate_dirs:
+            return
+
+        # Calculate total size
+        total_bytes = 0
+        for d in intermediate_dirs:
+            for root, _dirs, files in os.walk(d):
+                for f in files:
+                    try:
+                        total_bytes += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        size_mb = total_bytes / (1024 * 1024)
+
+        dir_names = ", ".join(os.path.basename(d) for d in intermediate_dirs)
+        reply = QMessageBox.question(
+            self,
+            "Clean Up Intermediate Files",
+            f"Delete intermediate files ({size_mb:.1f} MB)?\n\n"
+            f"Directories: {dir_names}\n\n"
+            "These can be regenerated if needed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            for d in intermediate_dirs:
+                try:
+                    shutil.rmtree(d)
+                except OSError as e:
+                    logger.warning(f"Failed to remove {d}: {e}")
+            self._status_bar.set_status(
+                f"Cleaned up {size_mb:.1f} MB of intermediate files", "ready"
+            )
+
+    def _ask_overwrite_action(self, count: int, mask_dir: str) -> str:
+        """Ask user what to do when output directory already has masks.
+
+        Returns 'cancel', 'overwrite', 'new_subfolder', or 'resume'.
+        """
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Existing Masks Detected")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText(
+            f"The output directory already contains {count} mask file(s).\n\n"
+            f"Directory: {mask_dir}"
+        )
+        msg.setInformativeText("How would you like to proceed?")
+
+        overwrite_btn = msg.addButton(
+            "Overwrite All", QMessageBox.ButtonRole.DestructiveRole,
+        )
+        resume_btn = msg.addButton(
+            "Resume (keep existing)", QMessageBox.ButtonRole.ActionRole,
+        )
+        subfolder_btn = msg.addButton(
+            "New Subfolder", QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel_btn = msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(cancel_btn)
+
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == overwrite_btn:
+            return "overwrite"
+        if clicked == resume_btn:
+            return "resume"
+        if clicked == subfolder_btn:
+            return "new_subfolder"
+        return "cancel"
 
     def _show_error(
         self,

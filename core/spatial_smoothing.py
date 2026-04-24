@@ -1,6 +1,8 @@
 """Perona-Malik anisotropic diffusion smoothing for binary masks.
 
-Corrected implementation using forward differences and proper divergence formula.
+Corrected implementation using forward differences and proper divergence formula,
+with per-iteration Gaussian blur for effective binary mask boundary smoothing.
+
 Reference: P. Perona and J. Malik, "Scale-Space and Edge Detection Using
 Anisotropic Diffusion," IEEE TPAMI, 1990.
 """
@@ -19,12 +21,13 @@ def perona_malik_smooth(
     dt: float = 0.1,
     kappa: float = 30.0,
     option: int = 1,
-    post_gaussian_sigma: float = 0.0,
+    gaussian_sigma: float = 2.0,
 ) -> np.ndarray:
     """Apply Perona-Malik anisotropic diffusion smoothing.
 
     Uses forward differences and proper divergence of (c * grad(u)) formula.
-    Edge-preserving: smooths homogeneous regions while preserving boundaries.
+    A Gaussian blur is applied every iteration to progressively soften binary
+    mask edges, enabling effective boundary smoothing after re-binarization.
 
     Args:
         image: Input image as numpy array (uint8 0-255 or float 0-1).
@@ -35,7 +38,9 @@ def perona_malik_smooth(
         option: Diffusivity function:
             1 = exp(-(|grad|/kappa)^2) -- favors high-contrast edges
             2 = 1 / (1 + (|grad|/kappa)^2) -- favors wide regions
-        post_gaussian_sigma: Optional Gaussian blur AFTER all iterations (0 = off).
+        gaussian_sigma: Gaussian blur sigma applied every iteration (0 = off).
+            For binary masks, this is the primary smoothing mechanism.
+            Recommended: 1.0-4.0.  Default 2.0 gives moderate smoothing.
 
     Returns:
         Smoothed binary mask as uint8 array (0 or 255).
@@ -75,9 +80,10 @@ def perona_malik_smooth(
         # Divergence of diffusion flux
         u = u + dt * (c_n * delta_n + c_s * delta_s + c_e * delta_e + c_w * delta_w)
 
-    # Optional post-smoothing (applied once AFTER all iterations)
-    if post_gaussian_sigma > 0:
-        u = gaussian_filter(u, sigma=post_gaussian_sigma)
+        # Gaussian blur every iteration: softens binary edges so that
+        # re-binarization at 0.5 produces a smooth boundary contour.
+        if gaussian_sigma > 0:
+            u = gaussian_filter(u, sigma=gaussian_sigma)
 
     binary = (u > 0.5).astype(np.uint8) * 255
     return binary

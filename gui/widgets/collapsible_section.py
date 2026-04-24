@@ -46,12 +46,22 @@ class _HeaderWidget(QFrame):
             layout.addWidget(icon_label)
 
         # Title
-        title_label = QLabel(title)
-        title_label.setStyleSheet(
+        self._title_label = QLabel(title)
+        self._title_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_SM}px; "
             f"font-weight: 600; background: transparent;"
         )
-        layout.addWidget(title_label)
+        layout.addWidget(self._title_label)
+
+        # Status badge (hidden by default)
+        self._badge_label = QLabel()
+        self._badge_label.setStyleSheet(
+            f"font-size: {Fonts.SIZE_XS}px; background: transparent; "
+            f"padding: 1px 6px; border-radius: 4px;"
+        )
+        self._badge_label.hide()
+        layout.addWidget(self._badge_label)
+
         layout.addStretch()
 
         # Chevron indicator
@@ -59,6 +69,30 @@ class _HeaderWidget(QFrame):
         self._update_chevron(True)
         self._chevron_label.setFixedSize(14, 14)
         layout.addWidget(self._chevron_label)
+
+    def set_title(self, title: str) -> None:
+        """Update the header title text."""
+        self._title_label.setText(title)
+
+    def set_title_color(self, color: str) -> None:
+        """Update the header title color."""
+        self._title_label.setStyleSheet(
+            f"color: {color}; font-size: {Fonts.SIZE_SM}px; "
+            f"font-weight: 600; background: transparent;"
+        )
+
+    def set_badge(self, text: str, color: str, bg_color: str) -> None:
+        """Show a status badge next to the title."""
+        if text:
+            self._badge_label.setText(text)
+            self._badge_label.setStyleSheet(
+                f"color: {color}; background: {bg_color}; "
+                f"font-size: {Fonts.SIZE_XS}px; padding: 1px 6px; "
+                f"border-radius: 4px; font-weight: 600;"
+            )
+            self._badge_label.show()
+        else:
+            self._badge_label.hide()
 
     def _update_chevron(self, is_open: bool) -> None:
         icon_name = "chevron-down" if is_open else "chevron-right"
@@ -130,6 +164,22 @@ class CollapsibleSection(QWidget):
     def is_open(self) -> bool:
         """Return whether the section is currently open."""
         return self._is_open
+
+    def set_title(self, title: str) -> None:
+        """Update the section title text."""
+        self._header.set_title(title)
+
+    def set_title_color(self, color: str) -> None:
+        """Update the section title color."""
+        self._header.set_title_color(color)
+
+    def set_badge(self, text: str, color: str, bg_color: str) -> None:
+        """Show a status badge in the header (e.g. 'DONE', 'LOCKED')."""
+        self._header.set_badge(text, color, bg_color)
+
+    def set_content_enabled(self, enabled: bool) -> None:
+        """Enable or disable all content widgets."""
+        self._content.setEnabled(enabled)
 
     def _toggle(self) -> None:
         self.set_open(not self._is_open)
